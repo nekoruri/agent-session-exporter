@@ -12,7 +12,7 @@ from typing import Any
 from .adapters import text_from_content
 from .core import Config, EventStore, normalize_event
 
-MAX_JSON_MEMBER_BYTES = 1024 * 1024 * 1024
+MAX_JSON_BYTES = 256 * 1024 * 1024
 
 
 def _timestamp(value: Any) -> str:
@@ -33,7 +33,7 @@ def _json_values(path: Path) -> Iterable[tuple[str, Any]]:
                 name = member.filename.lower()
                 if not name.endswith(".json") or member.is_dir():
                     continue
-                if member.file_size > MAX_JSON_MEMBER_BYTES:
+                if member.file_size > MAX_JSON_BYTES:
                     raise ValueError(f"JSON member is too large: {member.filename}")
                 with archive.open(member) as stream:
                     try:
@@ -41,6 +41,8 @@ def _json_values(path: Path) -> Iterable[tuple[str, Any]]:
                     except (json.JSONDecodeError, UnicodeError):
                         continue
         return
+    if path.stat().st_size > MAX_JSON_BYTES:
+        raise ValueError(f"JSON file is too large: {path.name}")
     with path.open(encoding="utf-8") as stream:
         yield path.name, json.load(stream)
 

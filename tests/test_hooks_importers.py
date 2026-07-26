@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 from agent_session_exporter.core import (
     CollectorConfig,
@@ -103,6 +105,29 @@ class HooksImportersTest(unittest.TestCase):
             self.assertIn("# Imported example", markdown)
             self.assertIn("Hello", markdown)
             self.assertIn("Welcome", markdown)
+
+    def test_rejects_oversized_json_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            export_path = root / "conversations.json"
+            export_path.write_text("{}", encoding="utf-8")
+            with (
+                patch("agent_session_exporter.importers.MAX_JSON_BYTES", 1),
+                self.assertRaisesRegex(ValueError, "JSON file is too large"),
+            ):
+                import_export(export_path, config_for(root))
+
+    def test_rejects_oversized_json_zip_member(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            export_path = root / "export.zip"
+            with zipfile.ZipFile(export_path, "w") as archive:
+                archive.writestr("conversations.json", "{}")
+            with (
+                patch("agent_session_exporter.importers.MAX_JSON_BYTES", 1),
+                self.assertRaisesRegex(ValueError, "JSON member is too large"),
+            ):
+                import_export(export_path, config_for(root))
 
 
 if __name__ == "__main__":

@@ -15,6 +15,18 @@ from typing import Any
 from .core import Config, EventStore, event_fingerprint, now_iso
 
 
+def _parse_cursor(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise TypeError("Cursor must be an integer.")
+    try:
+        cursor = int(value)
+    except ValueError as error:
+        raise ValueError("Cursor must be an integer.") from error
+    if cursor < 0:
+        raise ValueError("Cursor must not be negative.")
+    return cursor
+
+
 def _request_json(
     url: str,
     *,
@@ -74,7 +86,10 @@ def pull_events(config: Config, *, limit: int = 500) -> tuple[int, int]:
     imported = 0
     cursor = 0
     with EventStore(config.state_dir) as store:
-        cursor = int(store.get_metadata(cursor_key, "0"))
+        try:
+            cursor = _parse_cursor(store.get_metadata(cursor_key, "0"))
+        except (TypeError, ValueError):
+            cursor = 0
         while True:
             query = urllib.parse.urlencode({"after": cursor, "limit": limit})
             response = _request_json(
@@ -91,9 +106,16 @@ def pull_events(config: Config, *, limit: int = 500) -> tuple[int, int]:
                 item.pop("id", None)
                 _, inserted = store.add_event(item)
                 imported += int(inserted)
-            next_cursor = int(response.get("next_after") or cursor)
+            try:
+                next_cursor = _parse_cursor(response.get("next_after"))
+            except (TypeError, ValueError) as error:
+                raise RuntimeError(
+                    "Collector returned an invalid next_after cursor."
+                ) from error
             if next_cursor < cursor:
                 raise RuntimeError("Collector cursor moved backwards.")
+            if items and next_cursor == cursor:
+                raise RuntimeError("Collector cursor did not advance.")
             cursor = next_cursor
             store.set_metadata(cursor_key, str(cursor))
             if len(items) < limit:
