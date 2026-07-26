@@ -5,6 +5,7 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import sqlite3
 from collections.abc import Mapping
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -168,8 +169,16 @@ def _handler(config: Config, token: str) -> type[BaseHTTPRequestHandler]:
                         {"error": "not found"},
                     )
                     return
-                with EventStore(config.state_dir) as store:
-                    store.add_event(envelope)
+                try:
+                    with EventStore(config.state_dir) as store:
+                        store.add_event(envelope)
+                except (OSError, sqlite3.Error) as error:
+                    self.log_error("storage failure: %s", error)
+                    self._json_response(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"error": "storage unavailable"},
+                    )
+                    return
                 self._json_response(
                     HTTPStatus.ACCEPTED,
                     {},
