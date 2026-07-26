@@ -58,7 +58,7 @@ ase doctor
 
 - 設定: `~/.config/agent-session-exporter/config.toml`
 - 状態DB: `~/.local/state/agent-session-exporter/events.sqlite3`
-- Vault内: `inbox/ai-sessions/YYYY/MM/*.md`
+- Vault内: `ai-sessions/YYYY/MM/*.md`
 
 XDG環境変数で場所を変更できます。また、全コマンドで
 `--config /path/to/config.toml`をサブコマンドより前に指定できます。

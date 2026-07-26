@@ -14,10 +14,12 @@ from agent_session_exporter.adapters import (
 )
 from agent_session_exporter.cli import run
 from agent_session_exporter.core import (
+    DEFAULT_DESTINATION,
     CollectorConfig,
     Config,
     EventStore,
     ServerConfig,
+    load_config,
     normalize_event,
     render_initial_config,
 )
@@ -27,7 +29,7 @@ from agent_session_exporter.renderer import sync_vault
 def config_for(root: Path) -> Config:
     return Config(
         vault_path=root / "vault",
-        destination="inbox/ai-sessions",
+        destination=DEFAULT_DESTINATION,
         state_dir=root / "state",
         device_id="test-device",
         redact=True,
@@ -87,10 +89,19 @@ class CoreRendererTest(unittest.TestCase):
             self.assertEqual(sync_vault(config), (0, 1))
             notes = list((root / "vault").rglob("*.md"))
             self.assertEqual(len(notes), 1)
+            self.assertEqual(
+                notes[0].relative_to(root / "vault").parts[:3],
+                ("ai-sessions", "2026", "07"),
+            )
             markdown = notes[0].read_text(encoding="utf-8")
             self.assertIn("# Explain the failing test.", markdown)
             self.assertIn("## Assistant", markdown)
             self.assertIn("The fixture is missing.", markdown)
+
+    def test_default_destination_is_at_the_vault_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = load_config(Path(directory) / "missing.toml")
+        self.assertEqual(config.destination, "ai-sessions")
 
     def test_codex_and_claude_transcript_adapters(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
