@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Self
 
 CONFIG_FILE_NAME = "config.toml"
-DEFAULT_DESTINATION = "inbox/ai-sessions"
+DEFAULT_DESTINATION = "ai-sessions"
 SECRET_KEY_RE = re.compile(
     r"(?:^|[_-])(?:api[_-]?key|access[_-]?token|client[_-]?secret|"
     r"secret|token|password|passwd|authorization|cookie)(?:$|[_-])",

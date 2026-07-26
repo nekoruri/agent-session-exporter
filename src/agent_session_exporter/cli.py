@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 
 from . import __version__
 from .core import (
+    DEFAULT_DESTINATION,
     Config,
     EventStore,
     default_config_path,
@@ -72,7 +73,7 @@ def _build_parser() -> argparse.ArgumentParser:
     init.add_argument(
         "--destination",
         type=_valid_destination,
-        default="inbox/ai-sessions",
+        default=DEFAULT_DESTINATION,
     )
     init.add_argument("--force", action="store_true")
 
