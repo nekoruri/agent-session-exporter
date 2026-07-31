@@ -598,6 +598,12 @@ class EventStore:
             (session_key,),
         ).fetchone()
 
+    def list_render_states(self) -> list[sqlite3.Row]:
+        """Return all render states in stable path order."""
+        return self.connection.execute(
+            "SELECT * FROM render_state ORDER BY note_path, session_key"
+        ).fetchall()
+
     def set_render_state(
         self,
         session_key: str,
