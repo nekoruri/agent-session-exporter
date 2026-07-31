@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections import Counter
 from collections.abc import Iterable, Mapping
@@ -36,6 +37,8 @@ class SessionDocument:
     started_at: str
     ended_at: str
     status: str
+    event_count: int
+    revision: str
     messages: list[Message] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -86,6 +89,15 @@ def _deduplicate(messages: Iterable[Message]) -> list[Message]:
             )
         )
     return result
+
+
+def _session_revision(events: Iterable[StoredEvent]) -> str:
+    """Hash the ordered event fingerprints for downstream change detection."""
+    digest = hashlib.sha256()
+    for event in events:
+        digest.update(event.fingerprint.encode("ascii"))
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def parse_codex_transcript(path: Path) -> tuple[list[Message], dict[str, Any]]:
@@ -340,6 +352,8 @@ def build_session_document(events: list[StoredEvent]) -> SessionDocument:
         started_at=first.occurred_at,
         ended_at=last.occurred_at,
         status="active",
+        event_count=len(events),
+        revision=_session_revision(events),
         metadata={},
     )
 
