@@ -331,7 +331,7 @@ async function handleRequest(request, env) {
     requireToken(request, env.INGEST_TOKEN);
     const payload = await readJsonBody(request);
     await insertEvent(env.DB, await normalizeEvent(payload, env));
-    return new Response(null, { status: 204 });
+    return new Response(null, { status: 202 });
   }
   if (url.pathname === "/v1/events") {
     if (request.method !== "GET") throw new HttpError(405, "method not allowed");

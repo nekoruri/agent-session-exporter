@@ -19,7 +19,7 @@ Claude Code on the web ─> Worker ─> D1 ─> ase pull ───────�
 |---|---|---|
 | Codex CLI / Codex desktop host | ユーザーレベルのCodex hooks + transcript | 取得可能 |
 | Claude Code CLI / 対応デスクトップhost | ユーザーレベルのcommand hooks + transcript | 取得可能 |
-| Claude Code on the web | 認証付きHTTP hooks | `MessageDisplay`が有効なら取得可能 |
+| Claude Code on the web | remote専用command hookからcurlで転送 | `MessageDisplay`が有効なら取得可能 |
 | Codex Cloud | `codex cloud list/status/diff` | 公開CLIが返すメタデータ、初回prompt、diff。完全なtranscriptは対象外 |
 | ChatGPT / Claudeの一般Web・desktop | アカウントのdata exportを一括import | exportに含まれる会話 |
 
@@ -128,7 +128,7 @@ ase migrate-destination --apply
 
 ## 3. Claude Code on the web
 
-Claude Cloudから直接届くHTTP hookはCloudflare Workerで受け、D1へ一時保管します。
+Claude Cloudのcommand hookがイベントをcurlでCloudflare Workerへ送り、D1へ一時保管します。
 Vaultのある端末が`ase pull`で取り込むため、Vaultや自宅ネットワークを公開する
 必要はありません。Workerのdeploy手順は
 [`deploy/cloudflare-worker`](deploy/cloudflare-worker/)にあります。
@@ -140,11 +140,12 @@ ase hooks --source claude-cloud \
   --inbox-url https://agent-session-exporter.example.workers.dev
 ```
 
-出力をprojectの`.claude/settings.json`へマージします。Claude Code on the webの
-環境変数へ`AGENT_SESSION_EXPORTER_INGEST_TOKEN`を設定し、Workerのhostnameを
-network accessの許可listへ追加してください。生成したhookは
-`CLAUDE_CODE_REMOTE=true`のイベントだけを送るため、同じproject設定をローカルで
-使ってもD1には保存しません。受信するイベントは
+出力をprojectの`.claude/settings.json`へマージします。以前の`type: "http"`設定や
+検証用のcommand hookがある場合は、二重送信を避けるため、生成されたcommand hookへ
+置き換えてください。Claude Code on the webの環境変数へ
+`AGENT_SESSION_EXPORTER_INGEST_TOKEN`を設定し、Workerのhostnameをnetwork accessの
+許可listへ追加します。生成したhookは`CLAUDE_CODE_REMOTE=true`のときだけcurlを
+実行するため、同じproject設定をローカルで使っても通信しません。受信するイベントは
 `UserPromptSubmit`、`MessageDisplay`、`Stop`、`StopFailure`、
 `SessionEnd`です。
 
@@ -207,7 +208,7 @@ export形式が変更された場合はadapterの更新が必要です。
 
 ## 運用
 
-ローカルhookはSQLiteへ直接書きます。Claude CloudのHTTP hookだけはWorkerと
+ローカルhookはSQLiteへ直接書きます。Claude Cloudのcommand hookだけはWorkerと
 D1を経由し、`ase pull`で同じSQLiteへ取り込みます。重複イベントはfingerprintで
 排除し、`ase sync`は変更されたセッションだけを原子的に書き換えます。
 
@@ -243,5 +244,4 @@ python -m compileall -q src tests
 - [Codex Hooks](https://learn.chatgpt.com/docs/hooks)
 - [Codex Cloud CLI commands](https://learn.chatgpt.com/docs/developer-commands?surface=cli#cli-codex-cloud)
 - [Claude Code hooks](https://code.claude.com/docs/en/hooks)
-- [Claude Code HTTP hooks](https://code.claude.com/docs/en/hooks-guide#http-hooks)
 - [Claude Code on the web](https://code.claude.com/docs/en/claude-code-on-the-web)

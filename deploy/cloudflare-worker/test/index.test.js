@@ -158,8 +158,8 @@ test("valid events are normalized, redacted, deduplicated, and pulled", async ()
   });
   const first = await worker.fetch(hookRequest(payload), env);
   const duplicate = await worker.fetch(hookRequest(payload), env);
-  assert.equal(first.status, 204);
-  assert.equal(duplicate.status, 204);
+  assert.equal(first.status, 202);
+  assert.equal(duplicate.status, 202);
   assert.equal(env.DB.rows.length, 1);
 
   const pull = await worker.fetch(

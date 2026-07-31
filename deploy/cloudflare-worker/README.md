@@ -1,6 +1,6 @@
 # Claude Cloud受信Worker
 
-Claude Code on the webのHTTP hookを受け、redact済みのイベントをD1へ保存します。
+Claude Code on the webのcommand hookからイベントを受け、redact後にD1へ保存します。
 Vaultやローカル端末をインターネットへ公開する必要はありません。
 
 ## Deploy
@@ -44,14 +44,33 @@ ase hooks --source claude-cloud \
   --inbox-url https://agent-session-exporter.example.workers.dev
 ```
 
-出力をprojectの`.claude/settings.json`へマージします。Claude Code on the web側では、
-次の2点も設定します。
+出力をprojectの`.claude/settings.json`へマージします。以前の`type: "http"`設定や
+`.claude/settings.local.json`の検証用hookは削除し、同じイベントを二重送信しない
+状態にしてください。Claude Code on the web側では、次の2点も設定します。
 
 - 環境変数`AGENT_SESSION_EXPORTER_INGEST_TOKEN`へ`INGEST_TOKEN`を設定する
 - network accessでWorkerのhostnameを許可する
 
-生成されるhookは`X-Claude-Code-Remote` headerを付けます。Workerは値が`true`でない
-requestを保存しないため、同じproject設定をローカルで使っても二重収集しません。
+生成されるcommand hookは`CLAUDE_CODE_REMOTE=true`のときだけcurlを実行します。
+Cloud環境では`X-Claude-Code-Remote: true`を付け、Workerから202が返れば保存経路まで
+到達しています。同じproject設定をローカルで使っても通信しません。
+
+## Workerへの到達を確認する
+
+別のterminalでLive Tailを開始します。
+
+```bash
+cd deploy/cloudflare-worker
+npx wrangler tail --format pretty
+```
+
+アクセスログのstatusは次の意味です。
+
+- `202`: 認証、event検証、D1への書き込みまで完了した
+- `204`: `X-Claude-Code-Remote`が`true`でないため保存しなかった
+- `401`: `INGEST_TOKEN`が一致しない
+- `400`または`415`: eventまたはrequest bodyが不正
+- `503`: D1 bindingや内部処理を確認する必要がある
 
 ## Vault端末
 
@@ -84,7 +103,7 @@ serviceとtimerの雛形は[`../systemd-user`](../systemd-user/)にあります�
 
 ## Endpoint
 
-- `POST /v1/hooks/claude-cloud`: Claude Cloud専用。`INGEST_TOKEN`で認証する
+- `POST /v1/hooks/claude-cloud`: Claude Cloud専用。保存時は202、remote対象外は204を返す
 - `GET /v1/events?after=0&limit=500`: Vault端末専用。`PULL_TOKEN`で認証する
 - `GET /health`: bindingとsecretの設定状態だけを返す
 

@@ -8,7 +8,7 @@ Vaultへは直接同期しない。取得・正規化・描画を分離し、別
 ## データフロー
 
 1. ローカルの`capture`、Cloud poller、export importerがイベントを受け取る。
-2. Claude Code on the webのHTTP hookはCloudflare Workerが受け、D1へ保存する。
+2. Claude Code on the webのcommand hookがcurlでWorkerへ転送し、D1へ保存する。
 3. `normalize_event`がsource、device、session、時刻、project情報を付与し、
    credentialらしい値をredactする。Workerでも同等の処理を先に行う。
 4. SQLiteへappend-onlyで保存する。同じfingerprintのイベントは追加しない。
@@ -36,7 +36,7 @@ CodexとClaude Codeのローカルtranscriptは便利だが、安定APIとは限
 
 ### Cloudごとに能力差を残す
 
-非公開APIは使わない。Claude CloudはHTTP hookで
+非公開APIは使わない。Claude Cloudはcommand hookからのHTTP転送で
 表示messageを組み立てる。Codex Cloudは公開CLIのtask/status/diffと、
 wrapper経由の初回promptを保存する。
 
@@ -55,7 +55,8 @@ commitまでは行わない。VaultがGit管理されていても、commit/push�
 ## 信頼境界
 
 - Workerへの書き込みには`INGEST_TOKEN`、読み取りには別の`PULL_TOKEN`を使う。
-- Workerは`CLAUDE_CODE_REMOTE=true`のhookだけを受け付ける。
+- command hookは`CLAUDE_CODE_REMOTE=true`のときだけcurlを実行する。
+- Workerも`X-Claude-Code-Remote: true`のrequestだけを受け付ける。
 - Workerはevent名を固定listで検証し、credentialをredactしてからD1へ保存する。
 - Workerとローカルの双方でfingerprintを再計算する。
 - `transcript_path`はWorkerで破棄し、remoteから指定されたpathをローカルで読まない。
