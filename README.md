@@ -63,6 +63,18 @@ ase doctor
 XDG環境変数で場所を変更できます。また、全コマンドで
 `--config /path/to/config.toml`をサブコマンドより前に指定できます。
 
+`ase init`はOSからIANA timezone名を取得できれば、年・月・ファイル名に使う
+`path_timezone`の初期値として保存します。取得できない環境では`UTC`を使います。
+既存の設定ファイルにこの項目がない場合も、同じ検出結果を実行時の既定値として使い、
+設定ファイル自体は書き換えません。動作を固定したい場合は明示的に設定してください。
+
+```toml
+path_timezone = "Asia/Tokyo"
+```
+
+設定したtimezoneはOSのIANA timezone databaseで検証します。render stateがある
+既存セッションのパスは変更されません。
+
 ## 2. ローカルCLI / デスクトップhost
 
 既存設定を残したまま、ユーザーレベルのhookへ追記します。

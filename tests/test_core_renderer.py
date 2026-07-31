@@ -4,6 +4,7 @@ import io
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,6 +20,7 @@ from agent_session_exporter.core import (
     Config,
     EventStore,
     ServerConfig,
+    detect_local_timezone,
     load_config,
     normalize_event,
     render_initial_config,
@@ -208,9 +210,102 @@ class CoreRendererTest(unittest.TestCase):
             self.assertEqual(updated.event_count, 2)
 
     def test_default_destination_is_at_the_vault_root(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch(
+                "agent_session_exporter.core.detect_local_timezone",
+                return_value="Asia/Tokyo",
+            ),
+        ):
             config = load_config(Path(directory) / "missing.toml")
         self.assertEqual(config.destination, "ai-sessions")
+        self.assertEqual(config.path_timezone, "Asia/Tokyo")
+
+    def test_config_without_path_timezone_uses_detected_local_timezone(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.toml"
+            config_path.write_text('destination = "archive"\n', encoding="utf-8")
+            with patch(
+                "agent_session_exporter.core.detect_local_timezone",
+                return_value="America/New_York",
+            ) as detect:
+                config = load_config(config_path)
+
+        self.assertEqual(config.path_timezone, "America/New_York")
+        detect.assert_called_once_with()
+
+    def test_detect_local_timezone_skips_invalid_hints_and_falls_back(self) -> None:
+        with patch(
+            "agent_session_exporter.core._local_timezone_candidates",
+            return_value=("Not/A-Timezone", "Asia/Tokyo"),
+        ):
+            self.assertEqual(detect_local_timezone(), "Asia/Tokyo")
+        with patch(
+            "agent_session_exporter.core._local_timezone_candidates",
+            return_value=("Not/A-Timezone",),
+        ):
+            self.assertEqual(detect_local_timezone(), "UTC")
+
+    def test_init_writes_detected_local_timezone(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "config.toml"
+            with (
+                patch(
+                    "agent_session_exporter.core.detect_local_timezone",
+                    return_value="Asia/Tokyo",
+                ),
+                patch("sys.stdout", new_callable=io.StringIO),
+            ):
+                exit_code = run(
+                    [
+                        "--config",
+                        str(config_path),
+                        "init",
+                        "--vault",
+                        str(root / "vault"),
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            self.assertIn(
+                'path_timezone = "Asia/Tokyo"',
+                config_path.read_text(encoding="utf-8"),
+            )
+
+    def test_path_timezone_controls_note_directory_and_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = replace(config_for(root), path_timezone="Asia/Tokyo")
+            envelope = normalize_event(
+                {
+                    "session_id": "timezone-1",
+                    "hook_event_name": "UserPromptSubmit",
+                    "timestamp": "2026-07-31T16:42:16+00:00",
+                    "project": "demo",
+                    "prompt": "Use local date.",
+                },
+                "codex-cli",
+                config,
+            )
+            with EventStore(config.state_dir) as store:
+                store.add_event(envelope)
+
+            self.assertEqual(sync_vault(config), (1, 0))
+            note = next((root / "vault").rglob("*.md"))
+            relative = note.relative_to(root / "vault")
+            self.assertEqual(relative.parts[:3], ("ai-sessions", "2026", "08"))
+            self.assertTrue(relative.name.startswith("2026-08-01-0142-"))
+
+    def test_load_config_rejects_unknown_path_timezone(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.toml"
+            config_path.write_text(
+                'path_timezone = "Not/A-Timezone"\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "Unknown path_timezone"):
+                load_config(config_path)
 
     def test_codex_and_claude_transcript_adapters(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
