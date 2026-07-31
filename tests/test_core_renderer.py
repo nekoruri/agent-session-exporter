@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import sqlite3
 import tempfile
 import unittest
 from dataclasses import replace
@@ -128,8 +129,11 @@ class CoreRendererTest(unittest.TestCase):
                 for payload in payloads:
                     store.add_event(normalize_event(payload, "codex-cli", config))
 
-            self.assertEqual(sync_vault(config), (1, 0))
-            self.assertEqual(sync_vault(config), (0, 1))
+            with patch(
+                "agent_session_exporter.renderer.now_iso",
+                return_value="2026-07-26T01:04:00+00:00",
+            ):
+                self.assertEqual(sync_vault(config), (1, 0))
             notes = list((root / "vault").rglob("*.md"))
             self.assertEqual(len(notes), 1)
             self.assertEqual(
@@ -137,9 +141,14 @@ class CoreRendererTest(unittest.TestCase):
                 ("ai-sessions", "2026", "07"),
             )
             markdown = notes[0].read_text(encoding="utf-8")
+            self.assertEqual(sync_vault(config), (0, 1))
+            self.assertEqual(notes[0].read_text(encoding="utf-8"), markdown)
             self.assertIn("# Explain the failing test.", markdown)
             self.assertIn("## Assistant", markdown)
             self.assertIn("The fixture is missing.", markdown)
+            self.assertIn('updated_at: "2026-07-26T01:03:03+00:00"', markdown)
+            self.assertIn('rendered_at: "2026-07-26T01:04:00+00:00"', markdown)
+            self.assertNotIn("archived_at:", markdown)
             self.assertIn('content_kind: "transcript"', markdown)
             self.assertIn("message_count: 2", markdown)
             self.assertIn("event_count: 2", markdown)
@@ -208,6 +217,62 @@ class CoreRendererTest(unittest.TestCase):
             self.assertEqual(initial.revision, repeated.revision)
             self.assertNotEqual(initial.revision, updated.revision)
             self.assertEqual(updated.event_count, 2)
+
+    def test_completed_session_sets_archived_at(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = config_for(root)
+            envelope = normalize_event(
+                {
+                    "session_id": "completed-1",
+                    "hook_event_name": "SessionEnd",
+                    "timestamp": "2026-07-26T02:00:00+00:00",
+                    "project": "demo",
+                },
+                "claude-code",
+                config,
+            )
+            with EventStore(config.state_dir) as store:
+                store.add_event(envelope)
+            with patch(
+                "agent_session_exporter.renderer.now_iso",
+                return_value="2026-07-26T02:01:00+00:00",
+            ):
+                self.assertEqual(sync_vault(config), (1, 0))
+
+            note = next((root / "vault").rglob("*.md"))
+            markdown = note.read_text(encoding="utf-8")
+            self.assertIn('updated_at: "2026-07-26T02:00:00+00:00"', markdown)
+            self.assertIn('rendered_at: "2026-07-26T02:01:00+00:00"', markdown)
+            self.assertIn('archived_at: "2026-07-26T02:00:00+00:00"', markdown)
+
+    def test_existing_render_state_schema_adds_source_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = Path(directory) / "state"
+            state_dir.mkdir()
+            database = state_dir / "events.sqlite3"
+            connection = sqlite3.connect(database)
+            connection.execute(
+                """
+                CREATE TABLE render_state (
+                    session_key TEXT PRIMARY KEY,
+                    content_hash TEXT NOT NULL,
+                    note_path TEXT NOT NULL,
+                    rendered_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.commit()
+            connection.close()
+
+            with EventStore(state_dir) as store:
+                columns = {
+                    str(row["name"])
+                    for row in store.connection.execute(
+                        "PRAGMA table_info(render_state)"
+                    )
+                }
+            self.assertIn("source_hash", columns)
 
     def test_default_destination_is_at_the_vault_root(self) -> None:
         with (

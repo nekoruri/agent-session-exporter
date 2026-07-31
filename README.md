@@ -217,6 +217,10 @@ AGENTS.mdやenvironment contextなどの制御用テキストは本文へ残し�
 会話本文を取得できなかったセッションです。`revision`はセッション内のイベントが
 増えると変わるため、digestなど下流生成物の更新判定に利用できます。
 
+frontmatterの時刻は、`updated_at`が最後のイベント、`rendered_at`がMarkdownを
+実際に書いた時刻です。`archived_at`は完了または失敗したセッションだけに付き、
+継続可能な`active`と`stopped`には付きません。
+
 機密情報対策として、token、password、API key等の名前を持つJSON fieldと、
 代表的なcredential文字列を取り込み時にredactします。ただし万能ではありません。
 Vaultを同期・共有する前に内容を確認してください。toolの詳細はデフォルトでは
