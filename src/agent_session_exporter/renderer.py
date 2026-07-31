@@ -235,7 +235,7 @@ def _destination_note_path(
 
 def _generated_note(path: Path) -> tuple[str, str, str]:
     try:
-        content = path.read_text(encoding="utf-8")
+        content = path.read_bytes().decode("utf-8")
     except (OSError, UnicodeError) as error:
         return "", "", f"cannot read {path}: {error}"
     if GENERATED_MARKER not in content:
@@ -283,10 +283,21 @@ def _generated_note_body(content: str) -> str | None:
     lines = content.splitlines(keepends=True)
     if not lines or lines[0].rstrip("\r\n") != "---":
         return None
+    title: str | None = None
     index = 1
     while index < len(lines) and lines[index].rstrip("\r\n") != "---":
+        line = lines[index].rstrip("\r\n")
+        key, separator, encoded = line.partition(":")
+        if separator and key == "title":
+            try:
+                value = json.loads(encoded.strip())
+            except (json.JSONDecodeError, TypeError):
+                return None
+            if not isinstance(value, str):
+                return None
+            title = value
         index += 1
-    if index >= len(lines):
+    if index >= len(lines) or title is None:
         return None
     index += 1
     expected = ("", GENERATED_MARKER, "")
@@ -294,12 +305,11 @@ def _generated_note_body(content: str) -> str | None:
         if index >= len(lines) or lines[index].rstrip("\r\n") != value:
             return None
         index += 1
-    if index >= len(lines) or not lines[index].rstrip("\r\n").startswith("# "):
+    rendered = "".join(lines[index:])
+    heading = f"# {title}\n\n"
+    if not rendered.startswith(heading):
         return None
-    index += 1
-    if index >= len(lines) or lines[index].rstrip("\r\n") != "":
-        return None
-    return "".join(lines[index + 1 :])
+    return rendered[len(heading) :]
 
 
 def _stale_backup_path(
@@ -311,11 +321,13 @@ def _stale_backup_path(
 
 
 def _replace_with_backup(old: Path, new: Path, backup: Path) -> None:
-    """Replace a stale target and restore it if moving the source fails."""
+    """Replace a stale target and roll back only a verified incomplete move."""
     os.replace(new, backup)
     try:
         os.replace(old, new)
     except BaseException as error:
+        if not old.is_file() or new.exists():
+            raise
         try:
             os.replace(backup, new)
         except OSError as rollback_error:
@@ -430,7 +442,13 @@ def migrate_render_state(
                             config.vault_path,
                             backup_note_path,
                         )
-                        if backup_target.is_file():
+                        if backup_target.exists():
+                            if not backup_target.is_file():
+                                errors.append(
+                                    "stale backup conflicts: "
+                                    f"{backup_target}: not a file"
+                                )
+                                continue
                             problem = _verified_generated_hash(
                                 backup_target,
                                 new_hash,

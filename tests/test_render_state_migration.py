@@ -125,6 +125,10 @@ class RenderStateMigrationTest(unittest.TestCase):
                 'title: "Move this note."',
                 'title: "Old title"',
                 1,
+            ).replace(
+                "# Move this note.\n",
+                "# Old title\n",
+                1,
             ).replace("\nMove this note.\n", "\n", 1)
             new_target.write_text(stale, encoding="utf-8")
 
@@ -146,6 +150,42 @@ class RenderStateMigrationTest(unittest.TestCase):
                 state = store.get_render_state(key)
             self.assertEqual(str(state["note_path"]), new_path.as_posix())
             self.assertEqual(sync_vault(config), (0, 1))
+
+    def test_replaces_append_only_note_with_multiline_title(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old_config, old_path, key = create_old_note(root)
+            config = replace(old_config, destination="ai-sessions")
+            old_target = config.vault_path / Path(*old_path.parts)
+            current = old_target.read_text(encoding="utf-8")
+            current = current.replace(
+                'title: "Move this note."',
+                'title: "First line\\r\\nSecond line"',
+                1,
+            ).replace(
+                "# Move this note.\n",
+                "# First line\r\nSecond line\n",
+                1,
+            )
+            old_target.write_text(current, encoding="utf-8")
+            current_hash = hashlib.sha256(current.encode("utf-8")).hexdigest()
+            with EventStore(config.state_dir) as store:
+                store.set_render_state(key, current_hash, old_path.as_posix())
+
+            new_path = PurePosixPath("ai-sessions", *old_path.parts[-3:])
+            new_target = config.vault_path / Path(*new_path.parts)
+            new_target.parent.mkdir(parents=True)
+            stale = current.replace("\nMove this note.\n", "\n", 1)
+            new_target.write_text(stale, encoding="utf-8")
+
+            migrations, errors = migrate_render_state(config, apply=True)
+            self.assertEqual(errors, [])
+            self.assertEqual(
+                [item.operation for item in migrations],
+                ["replace-append-only"],
+            )
+            self.assertFalse(old_target.exists())
+            self.assertEqual(new_target.read_bytes().decode("utf-8"), current)
 
     def test_backs_up_modified_generated_note_before_replacing_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -250,6 +290,52 @@ class RenderStateMigrationTest(unittest.TestCase):
             self.assertTrue(old_target.exists())
             self.assertEqual(new_target.read_text(encoding="utf-8"), stale)
 
+    def test_does_not_restore_stale_target_after_completed_move(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old_config, old_path, _ = create_old_note(root)
+            config = replace(old_config, destination="ai-sessions")
+            old_target = config.vault_path / Path(*old_path.parts)
+            current = old_target.read_text(encoding="utf-8")
+            new_path = PurePosixPath("ai-sessions", *old_path.parts[-3:])
+            new_target = config.vault_path / Path(*new_path.parts)
+            new_target.parent.mkdir(parents=True)
+            stale = current.replace(
+                "\nMove this note.\n",
+                "\nEdited locally.\n",
+                1,
+            )
+            new_target.write_text(stale, encoding="utf-8")
+            planned, errors = migrate_render_state(config)
+            self.assertEqual(errors, [])
+            self.assertEqual([item.operation for item in planned], ["replace-stale"])
+            backup_path = planned[0].backup_path
+            if backup_path is None:
+                raise AssertionError("fixture has no backup path")
+            backup_target = config.vault_path / Path(*backup_path.parts)
+            real_replace = os.replace
+
+            def replace_then_interrupt(source: Path, target: Path) -> None:
+                real_replace(source, target)
+                if Path(source) == old_target and Path(target) == new_target:
+                    raise KeyboardInterrupt
+
+            with (
+                patch(
+                    "agent_session_exporter.renderer.os.replace",
+                    side_effect=replace_then_interrupt,
+                ),
+                self.assertRaises(KeyboardInterrupt),
+            ):
+                migrate_render_state(config, apply=True)
+
+            self.assertFalse(old_target.exists())
+            self.assertEqual(new_target.read_text(encoding="utf-8"), current)
+            self.assertEqual(backup_target.read_text(encoding="utf-8"), stale)
+            migrations, errors = migrate_render_state(config, apply=True)
+            self.assertEqual(errors, [])
+            self.assertEqual([item.operation for item in migrations], ["rebind"])
+
     def test_refuses_non_generated_destination(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -290,6 +376,7 @@ class RenderStateMigrationTest(unittest.TestCase):
             new_target.write_text(stale, encoding="utf-8")
             planned, errors = migrate_render_state(config)
             self.assertEqual(errors, [])
+            self.assertEqual([item.operation for item in planned], ["replace-stale"])
             backup_path = planned[0].backup_path
             if backup_path is None:
                 raise AssertionError("fixture has no backup path")
@@ -311,6 +398,39 @@ class RenderStateMigrationTest(unittest.TestCase):
                 conflicting_backup,
             )
             self.assertTrue(old_target.exists())
+
+    def test_refuses_directory_at_stale_backup_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old_config, old_path, _ = create_old_note(root)
+            config = replace(old_config, destination="ai-sessions")
+            old_target = config.vault_path / Path(*old_path.parts)
+            current = old_target.read_text(encoding="utf-8")
+            new_path = PurePosixPath("ai-sessions", *old_path.parts[-3:])
+            new_target = config.vault_path / Path(*new_path.parts)
+            new_target.parent.mkdir(parents=True)
+            stale = current.replace(
+                "\nMove this note.\n",
+                "\nEdited locally.\n",
+                1,
+            )
+            new_target.write_text(stale, encoding="utf-8")
+            planned, errors = migrate_render_state(config)
+            self.assertEqual(errors, [])
+            self.assertEqual([item.operation for item in planned], ["replace-stale"])
+            backup_path = planned[0].backup_path
+            if backup_path is None:
+                raise AssertionError("fixture has no backup path")
+            backup_target = config.vault_path / Path(*backup_path.parts)
+            backup_target.mkdir()
+
+            migrations, errors = migrate_render_state(config, apply=True)
+            self.assertEqual(migrations, [])
+            self.assertEqual(len(errors), 1)
+            self.assertIn("stale backup conflicts", errors[0])
+            self.assertIn("not a file", errors[0])
+            self.assertTrue(old_target.exists())
+            self.assertEqual(new_target.read_text(encoding="utf-8"), stale)
 
     def test_refuses_non_generated_note_even_when_hash_matches(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
