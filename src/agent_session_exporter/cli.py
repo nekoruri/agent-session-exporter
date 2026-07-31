@@ -364,9 +364,14 @@ def run(arguments: Sequence[str] | None = None) -> int:
         migrations, errors = migrate_render_state(config, apply=args.apply)
         prefix = "apply" if args.apply else "dry-run"
         for migration in migrations:
+            backup = (
+                f" backup={migration.backup_path}"
+                if migration.backup_path is not None
+                else ""
+            )
             print(
                 f"{prefix}: {migration.operation} "
-                f"{migration.old_path} -> {migration.new_path}"
+                f"{migration.old_path} -> {migration.new_path}{backup}"
             )
         for error in errors:
             print(f"error: {error}", file=sys.stderr)

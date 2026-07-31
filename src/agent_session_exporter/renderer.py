@@ -27,16 +27,18 @@ CONTROL_TITLE_PREFIXES = (
     "<command-",
     "<recommended_plugins>",
 )
+NOTE_IDENTITY_KEYS = ("source", "session_id", "device")
 
 
 @dataclass(frozen=True)
 class RenderStateMigration:
-    """One safe note move or render-state rebind."""
+    """One safe note move, rebind, or generated-target replacement."""
 
     session_key: str
     operation: str
     old_path: PurePosixPath
     new_path: PurePosixPath
+    backup_path: PurePosixPath | None = None
 
 
 def _yaml_scalar(value: object) -> str:
@@ -231,17 +233,110 @@ def _destination_note_path(
     return PurePosixPath(destination) / year / month / filename
 
 
-def _verified_generated_hash(path: Path, expected_hash: str) -> str:
+def _generated_note(path: Path) -> tuple[str, str, str]:
     try:
-        content = path.read_text(encoding="utf-8")
+        content = path.read_bytes().decode("utf-8")
     except (OSError, UnicodeError) as error:
-        return f"cannot read {path}: {error}"
+        return "", "", f"cannot read {path}: {error}"
     if GENERATED_MARKER not in content:
-        return f"refusing non-generated note: {path}"
+        return "", "", f"refusing non-generated note: {path}"
     actual_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    return content, actual_hash, ""
+
+
+def _verified_generated_hash(path: Path, expected_hash: str) -> str:
+    _, actual_hash, problem = _generated_note(path)
+    if problem:
+        return problem
     if actual_hash != expected_hash:
         return f"content differs from render state: {path}"
     return ""
+
+
+def _generated_note_parts(content: str) -> tuple[list[str], str] | None:
+    """Split frontmatter using only the LF delimiters emitted by the renderer."""
+    opening = "---\n"
+    closing = "\n---\n"
+    if not content.startswith(opening):
+        return None
+    end = content.find(closing, len(opening))
+    if end < 0:
+        return None
+    lines = content[len(opening) : end].split("\n")
+    return lines, content[end + len(closing) :]
+
+
+def _generated_note_identity(content: str) -> tuple[str, str, str] | None:
+    parts = _generated_note_parts(content)
+    if parts is None:
+        return None
+    lines, _ = parts
+    values: dict[str, str] = {}
+    for line in lines:
+        key, separator, encoded = line.partition(":")
+        if not separator or key not in NOTE_IDENTITY_KEYS:
+            continue
+        try:
+            value = json.loads(encoded.strip())
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(value, str):
+            return None
+        values[key] = str(value)
+    if any(key not in values for key in NOTE_IDENTITY_KEYS):
+        return None
+    return tuple(values[key] for key in NOTE_IDENTITY_KEYS)
+
+
+def _generated_note_body(content: str) -> str | None:
+    """Return content after generated frontmatter, marker, and title."""
+    parts = _generated_note_parts(content)
+    if parts is None:
+        return None
+    lines, rendered = parts
+    title: str | None = None
+    for line in lines:
+        key, separator, encoded = line.partition(":")
+        if separator and key == "title":
+            try:
+                value = json.loads(encoded.strip())
+            except (json.JSONDecodeError, TypeError):
+                return None
+            if not isinstance(value, str):
+                return None
+            title = value
+    if title is None:
+        return None
+    prefix = f"\n{GENERATED_MARKER}\n\n# {title}\n\n"
+    if not rendered.startswith(prefix):
+        return None
+    return rendered[len(prefix) :]
+
+
+def _stale_backup_path(
+    note_path: PurePosixPath,
+    content_hash: str,
+) -> PurePosixPath:
+    filename = f".{note_path.stem}.stale-{content_hash[:12]}{note_path.suffix}"
+    return note_path.with_name(filename)
+
+
+def _replace_with_backup(old: Path, new: Path, backup: Path) -> None:
+    """Replace a stale target and roll back only a verified incomplete move."""
+    os.replace(new, backup)
+    try:
+        os.replace(old, new)
+    except BaseException as error:
+        if not old.is_file() or new.exists():
+            raise
+        try:
+            os.replace(backup, new)
+        except OSError as rollback_error:
+            raise OSError(
+                f"cannot move {old} to {new}; rollback also failed: "
+                f"{rollback_error}"
+            ) from error
+        raise
 
 
 def render_state_path_issues(config: Config) -> list[str]:
@@ -297,12 +392,80 @@ def migrate_render_state(
                 continue
             expected_hash = str(state["content_hash"])
             operation = ""
+            backup_note_path: PurePosixPath | None = None
             if new_target.is_file():
-                problem = _verified_generated_hash(new_target, expected_hash)
+                new_content, new_hash, problem = _generated_note(new_target)
                 if problem:
                     errors.append(problem)
                     continue
-                operation = "rebind"
+                if new_hash == expected_hash:
+                    operation = "rebind"
+                elif old_target.is_file():
+                    old_content, old_hash, problem = _generated_note(old_target)
+                    if problem:
+                        errors.append(problem)
+                        continue
+                    if old_hash != expected_hash:
+                        errors.append(
+                            f"content differs from render state: {old_target}"
+                        )
+                        continue
+                    old_identity = _generated_note_identity(old_content)
+                    new_identity = _generated_note_identity(new_content)
+                    if old_identity is None or new_identity is None:
+                        errors.append(
+                            "cannot verify generated note identity: "
+                            f"{new_target}"
+                        )
+                        continue
+                    if old_identity != new_identity:
+                        errors.append(
+                            "refusing generated note for a different session: "
+                            f"{new_target}"
+                        )
+                        continue
+                    old_body = _generated_note_body(old_content)
+                    new_body = _generated_note_body(new_content)
+                    if old_body is None or new_body is None:
+                        errors.append(
+                            "cannot compare generated note body: "
+                            f"{new_target}"
+                        )
+                        continue
+                    if old_body.startswith(new_body):
+                        operation = "replace-append-only"
+                    else:
+                        backup_note_path = _stale_backup_path(
+                            new_note_path,
+                            new_hash,
+                        )
+                        backup_target = _safe_note_path(
+                            config.vault_path,
+                            backup_note_path,
+                        )
+                        if backup_target.exists():
+                            if not backup_target.is_file():
+                                errors.append(
+                                    "stale backup conflicts: "
+                                    f"{backup_target}: not a file"
+                                )
+                                continue
+                            problem = _verified_generated_hash(
+                                backup_target,
+                                new_hash,
+                            )
+                            if problem:
+                                errors.append(
+                                    "stale backup conflicts: "
+                                    f"{backup_target}: {problem}"
+                                )
+                                continue
+                        operation = "replace-stale"
+                else:
+                    errors.append(
+                        f"content differs from render state: {new_target}"
+                    )
+                    continue
             elif old_target.is_file():
                 problem = _verified_generated_hash(old_target, expected_hash)
                 if problem:
@@ -320,18 +483,38 @@ def migrate_render_state(
                 operation=operation,
                 old_path=old_note_path,
                 new_path=new_note_path,
+                backup_path=backup_note_path,
             )
-            migrations.append(migration)
             if not apply:
+                migrations.append(migration)
                 continue
             if operation == "move":
                 new_target.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(old_target, new_target)
+            elif operation == "replace-append-only":
+                problem = _verified_generated_hash(new_target, new_hash)
+                if problem:
+                    errors.append(
+                        "destination changed during migration: "
+                        f"{new_target}: {problem}"
+                    )
+                    continue
+                os.replace(old_target, new_target)
+            elif operation == "replace-stale":
+                if backup_note_path is None:
+                    raise AssertionError("replace-stale migration has no backup path")
+                backup_target = _safe_note_path(
+                    config.vault_path,
+                    backup_note_path,
+                )
+                backup_target.parent.mkdir(parents=True, exist_ok=True)
+                _replace_with_backup(old_target, new_target, backup_target)
             store.set_render_state(
                 migration.session_key,
                 expected_hash,
                 new_note_path.as_posix(),
             )
+            migrations.append(migration)
     return migrations, errors
 
 
