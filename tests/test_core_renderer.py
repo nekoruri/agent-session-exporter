@@ -97,6 +97,74 @@ class CoreRendererTest(unittest.TestCase):
             self.assertIn("# Explain the failing test.", markdown)
             self.assertIn("## Assistant", markdown)
             self.assertIn("The fixture is missing.", markdown)
+            self.assertIn('content_kind: "transcript"', markdown)
+            self.assertIn("message_count: 2", markdown)
+            self.assertIn("event_count: 2", markdown)
+            self.assertRegex(markdown, r'revision: "[0-9a-f]{64}"')
+
+    def test_metadata_only_session_has_ingest_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = config_for(root)
+            envelope = normalize_event(
+                {
+                    "session_id": "metadata-only-1",
+                    "hook_event_name": "SessionEnd",
+                    "timestamp": "2026-07-26T02:00:00+00:00",
+                    "project": "demo",
+                },
+                "claude-code",
+                config,
+            )
+            with EventStore(config.state_dir) as store:
+                store.add_event(envelope)
+
+            self.assertEqual(sync_vault(config), (1, 0))
+            note = next((root / "vault").rglob("*.md"))
+            markdown = note.read_text(encoding="utf-8")
+            self.assertIn('content_kind: "metadata_only"', markdown)
+            self.assertIn("message_count: 0", markdown)
+            self.assertIn("event_count: 1", markdown)
+
+    def test_session_revision_changes_only_when_events_change(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = config_for(Path(directory))
+            first = normalize_event(
+                {
+                    "session_id": "revision-1",
+                    "hook_event_name": "UserPromptSubmit",
+                    "timestamp": "2026-07-26T03:00:00+00:00",
+                    "prompt": "First",
+                },
+                "codex-cli",
+                config,
+            )
+            second = normalize_event(
+                {
+                    "session_id": "revision-1",
+                    "hook_event_name": "Stop",
+                    "timestamp": "2026-07-26T03:01:00+00:00",
+                    "last_assistant_message": "Second",
+                },
+                "codex-cli",
+                config,
+            )
+            with EventStore(config.state_dir) as store:
+                store.add_event(first)
+                initial = build_session_document(
+                    store.session_events("codex-cli", "test-device", "revision-1")
+                )
+                repeated = build_session_document(
+                    store.session_events("codex-cli", "test-device", "revision-1")
+                )
+                store.add_event(second)
+                updated = build_session_document(
+                    store.session_events("codex-cli", "test-device", "revision-1")
+                )
+
+            self.assertEqual(initial.revision, repeated.revision)
+            self.assertNotEqual(initial.revision, updated.revision)
+            self.assertEqual(updated.event_count, 2)
 
     def test_default_destination_is_at_the_vault_root(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

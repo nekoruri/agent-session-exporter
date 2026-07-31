@@ -28,6 +28,8 @@ CONTROL_TITLE_PREFIXES = (
 def _yaml_scalar(value: object) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return json.dumps(value)
     return json.dumps(str(value), ensure_ascii=False)
 
 
@@ -85,6 +87,12 @@ def render_markdown(document: SessionDocument) -> str:
         "started_at": document.started_at,
         "ended_at": document.ended_at,
         "status": document.status,
+        "content_kind": (
+            "transcript" if document.messages else "metadata_only"
+        ),
+        "message_count": len(document.messages),
+        "event_count": document.event_count,
+        "revision": document.revision,
         "archived_at": document.ended_at,
         "tags": "[ai-session]",
     }
