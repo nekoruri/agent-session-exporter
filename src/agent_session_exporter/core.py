@@ -30,6 +30,21 @@ SECRET_VALUE_RES = [
     re.compile(r"\bsk-[A-Za-z0-9_-]{12,}"),
     re.compile(r"\b(?:gh[opsu]_|github_pat_)[A-Za-z0-9_]{12,}"),
 ]
+CANONICAL_EVENT_NAMES = {
+    name.casefold(): name
+    for name in (
+        "UserPromptSubmit",
+        "MessageDisplay",
+        "Stop",
+        "StopFailure",
+        "SessionEnd",
+        "TaskComplete",
+        "Error",
+        "ImportedConversation",
+        "CodexCloudTask",
+        "CodexCloudTaskSubmitted",
+    )
+}
 
 
 def now_iso() -> str:
@@ -281,6 +296,24 @@ def _first_string(payload: Mapping[str, Any], keys: Iterable[str]) -> str:
     return ""
 
 
+def canonical_event_name(value: object) -> str:
+    """Return the canonical spelling for a known hook event name."""
+    text = str(value).strip()
+    return CANONICAL_EVENT_NAMES.get(text.casefold(), text or "Unknown")
+
+
+def _single_workspace_root(payload: Mapping[str, Any]) -> str:
+    roots = payload.get("workspace_roots") or payload.get("workspaceRoots")
+    if not isinstance(roots, list):
+        return ""
+    values = [
+        str(root).strip()
+        for root in roots
+        if root is not None and str(root).strip()
+    ]
+    return values[0] if len(values) == 1 else ""
+
+
 def normalize_event(
     payload: Mapping[str, Any],
     source: str,
@@ -298,13 +331,18 @@ def normalize_event(
     if not session_id:
         session_id = event_fingerprint(cleaned_payload)[:24]
 
-    event_name = (
+    raw_event_name = (
         _first_string(
             cleaned_payload,
             ["hook_event_name", "event_name", "event", "type"],
         )
         or "Unknown"
     )
+    event_name = canonical_event_name(raw_event_name)
+    for event_key in ("hook_event_name", "event_name", "event", "type"):
+        if str(cleaned_payload.get(event_key) or "").strip() == raw_event_name:
+            cleaned_payload[event_key] = event_name
+            break
     occurred_at = (
         _first_string(
             cleaned_payload,
@@ -313,6 +351,8 @@ def normalize_event(
         or now_iso()
     )
     cwd = _first_string(cleaned_payload, ["cwd", "working_directory"])
+    if not cwd:
+        cwd = _single_workspace_root(cleaned_payload)
     project_info = (
         inspect_project(cwd, config.project_aliases)
         if cwd and inspect_cwd
@@ -572,6 +612,12 @@ class EventStore:
             "SELECT * FROM render_state WHERE session_key = ?",
             (session_key,),
         ).fetchone()
+
+    def list_render_states(self) -> list[sqlite3.Row]:
+        """Return all render states in stable path order."""
+        return self.connection.execute(
+            "SELECT * FROM render_state ORDER BY note_path, session_key"
+        ).fetchall()
 
     def set_render_state(
         self,
