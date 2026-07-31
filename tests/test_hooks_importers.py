@@ -8,12 +8,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_session_exporter.core import (
-    CollectorConfig,
+    ClaudeCloudConfig,
     Config,
     EventStore,
-    ServerConfig,
 )
-from agent_session_exporter.hooks import install_local_hooks
+from agent_session_exporter.hooks import claude_cloud_hooks, install_local_hooks
 from agent_session_exporter.importers import import_export
 from agent_session_exporter.renderer import sync_vault
 
@@ -28,12 +27,57 @@ def config_for(root: Path) -> Config:
         include_tool_details=False,
         sync_on_capture=True,
         project_aliases={},
-        collector=CollectorConfig(),
-        server=ServerConfig(),
+        claude_cloud=ClaudeCloudConfig(),
     )
 
 
 class HooksImportersTest(unittest.TestCase):
+    def test_claude_cloud_hooks_are_remote_only_and_use_ingest_token(self) -> None:
+        settings = json.loads(claude_cloud_hooks("https://inbox.example/"))
+        hooks = settings["hooks"]
+        self.assertEqual(
+            set(hooks),
+            {
+                "UserPromptSubmit",
+                "MessageDisplay",
+                "Stop",
+                "StopFailure",
+                "SessionEnd",
+            },
+        )
+        handler = hooks["UserPromptSubmit"][0]["hooks"][0]
+        self.assertEqual(
+            handler["url"],
+            "https://inbox.example/v1/hooks/claude-cloud",
+        )
+        self.assertEqual(
+            handler["headers"],
+            {
+                "Authorization": "Bearer $AGENT_SESSION_EXPORTER_INGEST_TOKEN",
+                "X-Claude-Code-Remote": "$CLAUDE_CODE_REMOTE",
+            },
+        )
+        self.assertEqual(
+            handler["allowedEnvVars"],
+            ["AGENT_SESSION_EXPORTER_INGEST_TOKEN", "CLAUDE_CODE_REMOTE"],
+        )
+
+    def test_claude_cloud_hooks_require_https(self) -> None:
+        for value in (
+            "http://inbox.example",
+            "https://",
+            "https://inbox.example/path",
+            "https://token@inbox.example",
+        ):
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "HTTPS origin",
+                ),
+            ):
+                claude_cloud_hooks(value)
+
     def test_hook_install_is_additive_and_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "settings.json"

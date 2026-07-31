@@ -12,7 +12,9 @@ Obsidian Vault向けのMarkdownへ変換するPython 3.11以上のCLIです。
 - `src/agent_session_exporter/cli.py`: `ase` コマンドの入口
 - `src/agent_session_exporter/hooks.py`: Codex / Claude hook設定
 - `src/agent_session_exporter/importers.py`: ChatGPT / Claude export取込
-- `src/agent_session_exporter/remote.py`, `server.py`: remote転送、pull、HTTP collector
+- `src/agent_session_exporter/claude_cloud.py`: Worker受信箱からのpull
+- `src/agent_session_exporter/codex_cloud.py`: Codex Cloud CLI連携
+- `deploy/cloudflare-worker/`: Claude Cloud hookを受けるWorkerとD1 schema
 - `tests/`: unittest、`docs/architecture.md`: 設計判断
 
 ## 開発

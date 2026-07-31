@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "agent-session-exporter",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-01",
+  "workers_dev": true,
+  "vars": {
+    "DEVICE_ID": "claude-cloud"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "agent-session-exporter"
+    }
+  ]
+}

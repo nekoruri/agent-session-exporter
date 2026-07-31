@@ -5,5 +5,5 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-EnvironmentFile=%h/.config/agent-session-exporter/collector.env
+EnvironmentFile=%h/.config/agent-session-exporter/claude-cloud.env
 ExecStart=%h/.local/bin/ase pull --sync

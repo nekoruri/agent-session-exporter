@@ -43,7 +43,7 @@ AGENTS.md、`<environment_context>`、`<command-...>`などの制御用テキス
 
 `sessionEnd`など既知イベント名の大文字・小文字の違いをcanonical名へそろえる。
 `cwd`がなく、`workspace_roots`にルートが1件だけある場合は、その値をproject判定に
-利用する。remote collectorに渡されたパスからcollector側のファイルは読まない。
+利用する。Claude Cloudから渡されたパスをローカル端末で読まない。
 
 ## PR 4: destination変更後のrender stateを安全に修復する
 

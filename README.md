@@ -4,13 +4,13 @@ Codex / Claude の会話履歴を、特定ワークスペースや `.ai/` に依
 Obsidian Vaultへ集約する小さなアーカイバです。
 
 ローカルCLI、デスクトップアプリ、Cloud環境では取得できる情報が異なるため、
-入口を複数用意し、SQLiteの共通イベント形式を経由して同じMarkdownへ変換します。
+入口を複数用意し、共通イベント形式を経由して同じMarkdownへ変換します。
 
 ```text
-Codex / Claude Code hooks ─┐
-Claude Cloud HTTP hooks ───┼─> SQLite event store ─> Markdown ─> Obsidian Vault
-Codex Cloud CLI poller ─────┤
-ChatGPT / Claude exports ───┘
+Codex / Claude Code hooks ───────────────┐
+Codex Cloud CLI / data export ───────────┼─> local SQLite ─> Markdown ─> Vault
+Claude Code on the web ─> Worker ─> D1 ─> ase pull ────────┘             │
+                                                                         └─> Obsidian Sync
 ```
 
 ## 対応範囲
@@ -31,6 +31,7 @@ DOMを直接読む方式には依存しません。
 - Python 3.11以上
 - 実行時の外部Python packageなし
 - Codex Cloud連携だけは、認証済みの`codex` CLIが必要
+- Claude Cloud受信基盤を自分でdeployする場合だけ、Node.jsとCloudflare accountが必要
 
 推奨:
 
@@ -125,31 +126,25 @@ ase migrate-destination --apply
 置き換えます。生成物ではないMarkdown、別セッション、最新内容を確認できない移動元は
 引き続き変更せずエラーにします。
 
-## 3. Claude Cloud / 別マシンから収集
+## 3. Claude Code on the web
 
-collectorはSQLiteへイベントを受け取るだけです。Vaultは公開せず、
-Vaultのある端末がcollectorからpullします。
-
-collector側:
-
-```bash
-export AGENT_SESSION_EXPORTER_TOKEN='十分に長いランダム値'
-ase serve
-```
-
-インターネットから受ける場合は、TLSを終端するreverse proxyやCloud Run等の
-背後で動かしてください。loopback以外へlistenする設定ではtokenが必須です。
-Obsidian Local REST APIをインターネットへ公開する必要はありません。
+Claude Cloudから直接届くHTTP hookはCloudflare Workerで受け、D1へ一時保管します。
+Vaultのある端末が`ase pull`で取り込むため、Vaultや自宅ネットワークを公開する
+必要はありません。Workerのdeploy手順は
+[`deploy/cloudflare-worker`](deploy/cloudflare-worker/)にあります。
 
 Claude Cloud向けhook設定を生成:
 
 ```bash
 ase hooks --source claude-cloud \
-  --collector-url https://sessions.example.com
+  --inbox-url https://agent-session-exporter.example.workers.dev
 ```
 
-出力をClaude Code環境の設定へマージし、環境変数
-`AGENT_SESSION_EXPORTER_TOKEN`を設定します。受信するイベントは
+出力をprojectの`.claude/settings.json`へマージします。Claude Code on the webの
+環境変数へ`AGENT_SESSION_EXPORTER_INGEST_TOKEN`を設定し、Workerのhostnameを
+network accessの許可listへ追加してください。生成したhookは
+`CLAUDE_CODE_REMOTE=true`のイベントだけを送るため、同じproject設定をローカルで
+使ってもD1には保存しません。受信するイベントは
 `UserPromptSubmit`、`MessageDisplay`、`Stop`、`StopFailure`、
 `SessionEnd`です。
 
@@ -160,18 +155,22 @@ ase hooks --source claude-cloud \
 Vault端末の`config.toml`:
 
 ```toml
-[collector]
-url = "https://sessions.example.com"
-token_env = "AGENT_SESSION_EXPORTER_TOKEN"
+[claude_cloud]
+url = "https://agent-session-exporter.example.workers.dev"
+token_env = "AGENT_SESSION_EXPORTER_PULL_TOKEN"
 timeout_seconds = 3.0
 ```
 
 取得して同期:
 
 ```bash
-export AGENT_SESSION_EXPORTER_TOKEN='collectorと同じ値'
+export AGENT_SESSION_EXPORTER_PULL_TOKEN='pull専用token'
 ase pull --sync
 ```
+
+hookが使う`INGEST_TOKEN`と、ローカル取得に使う`PULL_TOKEN`は別の値にします。
+Claude Cloud側のtokenが漏れても、保存済みイベントの読み取りには使えません。
+D1はappend-onlyの受信箱として扱い、取得後も自動削除しません。
 
 systemd user service例は
 [`deploy/systemd-user`](deploy/systemd-user/)にあります。
@@ -208,8 +207,8 @@ export形式が変更された場合はadapterの更新が必要です。
 
 ## 運用
 
-hookはまずローカルDBへ書き、その後remote collectorへbest-effortで転送します。
-ネットワーク障害でエージェント本体を止めません。重複イベントはfingerprintで
+ローカルhookはSQLiteへ直接書きます。Claude CloudのHTTP hookだけはWorkerと
+D1を経由し、`ase pull`で同じSQLiteへ取り込みます。重複イベントはfingerprintで
 排除し、`ase sync`は変更されたセッションだけを原子的に書き換えます。
 
 ノートのタイトルはhookが渡す最初の実ユーザープロンプトを優先します。

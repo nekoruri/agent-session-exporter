@@ -1,126 +1,14 @@
-"""Remote collector transport and Codex Cloud metadata ingestion."""
+"""Codex Cloud metadata ingestion through the public Codex CLI."""
 
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
-import urllib.error
-import urllib.parse
-import urllib.request
 from collections.abc import Mapping
 from typing import Any
 
 from .core import Config, EventStore, event_fingerprint, now_iso
-
-
-def _parse_cursor(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, (int, str)):
-        raise TypeError("Cursor must be an integer.")
-    try:
-        cursor = int(value)
-    except ValueError as error:
-        raise ValueError("Cursor must be an integer.") from error
-    if cursor < 0:
-        raise ValueError("Cursor must not be negative.")
-    return cursor
-
-
-def _request_json(
-    url: str,
-    *,
-    method: str = "GET",
-    token: str = "",
-    payload: Mapping[str, Any] | None = None,
-    timeout: float = 10.0,
-) -> dict[str, Any]:
-    data = None
-    headers = {"Accept": "application/json"}
-    if payload is not None:
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(
-        url,
-        data=data,
-        headers=headers,
-        method=method,
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            result = json.loads(response.read())
-    except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Collector returned HTTP {error.code}: {detail}") from error
-    except urllib.error.URLError as error:
-        raise RuntimeError(f"Collector request failed: {error.reason}") from error
-    if not isinstance(result, dict):
-        raise TypeError("Collector returned an unexpected response.")
-    return result
-
-
-def push_event(config: Config, envelope: Mapping[str, Any]) -> bool:
-    """Push an already normalized event when a collector is configured."""
-    if not config.collector.url:
-        return False
-    token = os.environ.get(config.collector.token_env, "")
-    _request_json(
-        f"{config.collector.url}/v1/events",
-        method="POST",
-        token=token,
-        payload=envelope,
-        timeout=config.collector.timeout_seconds,
-    )
-    return True
-
-
-def pull_events(config: Config, *, limit: int = 500) -> tuple[int, int]:
-    """Pull new remote events into the local store."""
-    if not config.collector.url:
-        raise ValueError("collector.url is not configured.")
-    token = os.environ.get(config.collector.token_env, "")
-    limit = min(max(limit, 1), 5000)
-    cursor_key = f"remote-cursor:{config.collector.url}"
-    imported = 0
-    cursor = 0
-    with EventStore(config.state_dir) as store:
-        try:
-            cursor = _parse_cursor(store.get_metadata(cursor_key, "0"))
-        except (TypeError, ValueError):
-            cursor = 0
-        while True:
-            query = urllib.parse.urlencode({"after": cursor, "limit": limit})
-            response = _request_json(
-                f"{config.collector.url}/v1/events?{query}",
-                token=token,
-                timeout=max(config.collector.timeout_seconds, 10.0),
-            )
-            items = response.get("events")
-            if not isinstance(items, list):
-                raise TypeError("Collector response does not contain events.")
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                item.pop("id", None)
-                _, inserted = store.add_event(item)
-                imported += int(inserted)
-            try:
-                next_cursor = _parse_cursor(response.get("next_after"))
-            except (TypeError, ValueError) as error:
-                raise RuntimeError(
-                    "Collector returned an invalid next_after cursor."
-                ) from error
-            if next_cursor < cursor:
-                raise RuntimeError("Collector cursor moved backwards.")
-            if items and next_cursor == cursor:
-                raise RuntimeError("Collector cursor did not advance.")
-            cursor = next_cursor
-            store.set_metadata(cursor_key, str(cursor))
-            if len(items) < limit:
-                break
-    return imported, cursor
 
 
 def _run_codex_cloud(arguments: list[str]) -> str:
