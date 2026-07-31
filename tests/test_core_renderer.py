@@ -61,6 +61,47 @@ class CoreRendererTest(unittest.TestCase):
             self.assertFalse(second_inserted)
             self.assertEqual(first_id, second_id)
 
+    def test_normalizes_event_name_and_single_workspace_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = config_for(Path(directory))
+            envelope = normalize_event(
+                {
+                    "session_id": "desktop-1",
+                    "hook_event_name": "sessionEnd",
+                    "workspace_roots": ["/home/masa/work/zenn-content"],
+                },
+                "claude-code",
+                config,
+                inspect_cwd=False,
+            )
+            self.assertEqual(envelope["event_name"], "SessionEnd")
+            self.assertEqual(envelope["payload"]["hook_event_name"], "SessionEnd")
+            self.assertEqual(envelope["cwd"], "/home/masa/work/zenn-content")
+            self.assertEqual(envelope["project"], "zenn-content")
+
+            with EventStore(config.state_dir) as store:
+                store.add_event(envelope)
+                document = build_session_document(
+                    store.session_events("claude-code", "test-device", "desktop-1")
+                )
+            self.assertEqual(document.status, "completed")
+
+    def test_does_not_guess_from_multiple_workspace_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = config_for(Path(directory))
+            envelope = normalize_event(
+                {
+                    "session_id": "desktop-2",
+                    "hook_event_name": "sessionEnd",
+                    "workspace_roots": ["/workspace/one", "/workspace/two"],
+                },
+                "claude-code",
+                config,
+                inspect_cwd=False,
+            )
+            self.assertEqual(envelope["cwd"], "")
+            self.assertEqual(envelope["project"], "unknown")
+
     def test_sync_writes_stable_markdown(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
