@@ -63,6 +63,15 @@ ase doctor
 XDG環境変数で場所を変更できます。また、全コマンドで
 `--config /path/to/config.toml`をサブコマンドより前に指定できます。
 
+年・月・ファイル名の日時は既定でUTCです。日次運用をローカル日付へ合わせる場合は、
+IANA timezone名を設定します。既存セッションのパスは変更されません。
+
+```toml
+path_timezone = "Asia/Tokyo"
+```
+
+UTC以外ではOSのIANA timezone databaseを利用します。
+
 ## 2. ローカルCLI / デスクトップhost
 
 既存設定を残したまま、ユーザーレベルのhookへ追記します。

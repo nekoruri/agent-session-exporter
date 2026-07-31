@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Self
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 CONFIG_FILE_NAME = "config.toml"
 DEFAULT_DESTINATION = "ai-sessions"
@@ -82,12 +83,24 @@ class Config:
     project_aliases: dict[str, str]
     collector: CollectorConfig
     server: ServerConfig
+    path_timezone: str = "UTC"
 
 
 def _expand_optional_path(value: Any) -> Path | None:
     if value in (None, ""):
         return None
     return Path(str(value)).expanduser().resolve()
+
+
+def _path_timezone(value: object) -> str:
+    name = str(value or "UTC").strip()
+    if name == "UTC":
+        return name
+    try:
+        ZoneInfo(name)
+    except ZoneInfoNotFoundError as error:
+        raise ValueError(f"Unknown path_timezone: {name}") from error
+    return name
 
 
 def load_config(path: Path | None = None) -> Config:
@@ -130,6 +143,7 @@ def load_config(path: Path | None = None) -> Config:
                 server_raw.get("token_env") or "AGENT_SESSION_EXPORTER_TOKEN"
             ),
         ),
+        path_timezone=_path_timezone(raw.get("path_timezone")),
     )
 
 
@@ -140,6 +154,7 @@ def render_initial_config(vault_path: Path, destination: str) -> str:
     return (
         f"vault_path = {escaped_vault}\n"
         f'destination = "{destination.strip("/")}"\n'
+        'path_timezone = "UTC"\n'
         f"device_id = {escaped_device}\n"
         "redact = true\n"
         "include_tool_details = false\n"

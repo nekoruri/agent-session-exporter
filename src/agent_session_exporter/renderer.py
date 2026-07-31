@@ -7,8 +7,9 @@ import json
 import os
 import re
 import tempfile
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .adapters import Message, SessionDocument, build_session_document
 from .core import Config, EventStore
@@ -30,12 +31,22 @@ def _clean_name(value: str, fallback: str) -> str:
     return (cleaned or fallback)[:80]
 
 
-def _parse_date(value: str) -> datetime:
+def _parse_date(value: str, timezone_name: str) -> datetime:
     normalized = value.replace("Z", "+00:00")
     try:
-        return datetime.fromisoformat(normalized)
+        date = datetime.fromisoformat(normalized)
     except ValueError:
-        return datetime.now().astimezone()
+        date = datetime.now(UTC)
+    if date.tzinfo is None:
+        date = date.replace(tzinfo=UTC)
+    if timezone_name == "UTC":
+        timezone = UTC
+    else:
+        try:
+            timezone = ZoneInfo(timezone_name)
+        except ZoneInfoNotFoundError as error:
+            raise ValueError(f"Unknown path_timezone: {timezone_name}") from error
+    return date.astimezone(timezone)
 
 
 def _first_user_text(messages: list[Message]) -> str:
@@ -130,8 +141,12 @@ def render_markdown(document: SessionDocument) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _new_note_path(document: SessionDocument, destination: str) -> PurePosixPath:
-    date = _parse_date(document.started_at)
+def _new_note_path(
+    document: SessionDocument,
+    destination: str,
+    timezone_name: str,
+) -> PurePosixPath:
+    date = _parse_date(document.started_at, timezone_name)
     source = _clean_name(document.source, "agent")
     project = _clean_name(document.project, "unknown")
     readable_id = _clean_name(document.session_id, "session")[:8]
@@ -194,7 +209,11 @@ def _sync_stored_session(
         if str(state["content_hash"]) == content_hash:
             return False
     else:
-        note_path = _new_note_path(document, config.destination)
+        note_path = _new_note_path(
+            document,
+            config.destination,
+            config.path_timezone,
+        )
     target = _safe_note_path(config.vault_path, note_path)
     _atomic_write(target, content)
     store.set_render_state(key, content_hash, note_path.as_posix())

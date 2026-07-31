@@ -4,6 +4,7 @@ import io
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -102,6 +103,41 @@ class CoreRendererTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             config = load_config(Path(directory) / "missing.toml")
         self.assertEqual(config.destination, "ai-sessions")
+        self.assertEqual(config.path_timezone, "UTC")
+
+    def test_path_timezone_controls_note_directory_and_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = replace(config_for(root), path_timezone="Asia/Tokyo")
+            envelope = normalize_event(
+                {
+                    "session_id": "timezone-1",
+                    "hook_event_name": "UserPromptSubmit",
+                    "timestamp": "2026-07-31T16:42:16+00:00",
+                    "project": "demo",
+                    "prompt": "Use local date.",
+                },
+                "codex-cli",
+                config,
+            )
+            with EventStore(config.state_dir) as store:
+                store.add_event(envelope)
+
+            self.assertEqual(sync_vault(config), (1, 0))
+            note = next((root / "vault").rglob("*.md"))
+            relative = note.relative_to(root / "vault")
+            self.assertEqual(relative.parts[:3], ("ai-sessions", "2026", "08"))
+            self.assertTrue(relative.name.startswith("2026-08-01-0142-"))
+
+    def test_load_config_rejects_unknown_path_timezone(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.toml"
+            config_path.write_text(
+                'path_timezone = "Not/A-Timezone"\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "Unknown path_timezone"):
+                load_config(config_path)
 
     def test_codex_and_claude_transcript_adapters(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
