@@ -63,6 +63,18 @@ ase doctor
 XDG環境変数で場所を変更できます。また、全コマンドで
 `--config /path/to/config.toml`をサブコマンドより前に指定できます。
 
+`ase init`はOSからIANA timezone名を取得できれば、年・月・ファイル名に使う
+`path_timezone`の初期値として保存します。取得できない環境では`UTC`を使います。
+既存の設定ファイルにこの項目がない場合も、同じ検出結果を実行時の既定値として使い、
+設定ファイル自体は書き換えません。動作を固定したい場合は明示的に設定してください。
+
+```toml
+path_timezone = "Asia/Tokyo"
+```
+
+設定したtimezoneはOSのIANA timezone databaseで検証します。render stateがある
+既存セッションのパスは変更されません。
+
 ## 2. ローカルCLI / デスクトップhost
 
 既存設定を残したまま、ユーザーレベルのhookへ追記します。
@@ -97,6 +109,18 @@ ase sync
 
 cron、systemd timer、launchdなどから定期実行できます。
 
+`destination`を変更した場合、既存セッションの保存先はrender stateに残ります。
+まずdry-runで移動・再紐付けの対象を確認し、問題がなければ適用します。
+
+```bash
+ase doctor
+ase migrate-destination
+ase migrate-destination --apply
+```
+
+移動対象と現在の内容が異なる場合や、生成物ではないMarkdownがある場合は
+上書きせずエラーにします。
+
 ## 3. Claude Cloud / 別マシンから収集
 
 collectorはSQLiteへイベントを受け取るだけです。Vaultは公開せず、
@@ -124,6 +148,10 @@ ase hooks --source claude-cloud \
 `AGENT_SESSION_EXPORTER_TOKEN`を設定します。受信するイベントは
 `UserPromptSubmit`、`MessageDisplay`、`Stop`、`StopFailure`、
 `SessionEnd`です。
+
+既知のhookイベント名は大文字・小文字の表記揺れを正規化します。`cwd`がなく
+`workspace_roots`が1件だけ含まれるイベントでは、そのworkspaceをproject判定に
+利用します。複数workspaceから代表を推測することはありません。
 
 Vault端末の`config.toml`:
 
@@ -179,6 +207,15 @@ export形式が変更された場合はadapterの更新が必要です。
 hookはまずローカルDBへ書き、その後remote collectorへbest-effortで転送します。
 ネットワーク障害でエージェント本体を止めません。重複イベントはfingerprintで
 排除し、`ase sync`は変更されたセッションだけを原子的に書き換えます。
+
+ノートのタイトルはhookが渡す最初の実ユーザープロンプトを優先します。
+AGENTS.mdやenvironment contextなどの制御用テキストは本文へ残しますが、
+タイトル候補には使いません。
+
+生成するfrontmatterには、ingest判定向けの`content_kind`、`message_count`、
+`event_count`、`revision`も含まれます。`content_kind = "metadata_only"`なら
+会話本文を取得できなかったセッションです。`revision`はセッション内のイベントが
+増えると変わるため、digestなど下流生成物の更新判定に利用できます。
 
 frontmatterの時刻は、`updated_at`が最後のイベント、`rendered_at`がMarkdownを
 実際に書いた時刻です。`archived_at`は完了または失敗したセッションだけに付き、

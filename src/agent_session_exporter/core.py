@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Self
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 CONFIG_FILE_NAME = "config.toml"
 DEFAULT_DESTINATION = "ai-sessions"
@@ -29,6 +30,22 @@ SECRET_VALUE_RES = [
     re.compile(r"\bsk-[A-Za-z0-9_-]{12,}"),
     re.compile(r"\b(?:gh[opsu]_|github_pat_)[A-Za-z0-9_]{12,}"),
 ]
+UTC_TIMEZONE_NAMES = {"UTC", "Etc/UTC", "Etc/GMT", "GMT"}
+CANONICAL_EVENT_NAMES = {
+    name.casefold(): name
+    for name in (
+        "UserPromptSubmit",
+        "MessageDisplay",
+        "Stop",
+        "StopFailure",
+        "SessionEnd",
+        "TaskComplete",
+        "Error",
+        "ImportedConversation",
+        "CodexCloudTask",
+        "CodexCloudTaskSubmitted",
+    )
+}
 
 
 def now_iso() -> str:
@@ -82,12 +99,94 @@ class Config:
     project_aliases: dict[str, str]
     collector: CollectorConfig
     server: ServerConfig
+    path_timezone: str = "UTC"
 
 
 def _expand_optional_path(value: Any) -> Path | None:
     if value in (None, ""):
         return None
     return Path(str(value)).expanduser().resolve()
+
+
+def _zoneinfo_name_from_path(path: Path) -> str:
+    """Return an IANA key from a path below a zoneinfo directory."""
+    normalized = path.as_posix()
+    marker = "/zoneinfo/"
+    if marker not in normalized:
+        return ""
+    name = normalized.split(marker, 1)[1].strip("/")
+    for prefix in ("posix/", "right/"):
+        if name.startswith(prefix):
+            name = name[len(prefix) :]
+            break
+    return name
+
+
+def _local_timezone_candidates() -> Iterable[str]:
+    """Yield local timezone hints without requiring third-party packages."""
+    environment = os.environ.get("TZ", "").strip()
+    if environment:
+        yield environment
+
+    timezone = datetime.now().astimezone().tzinfo
+    key = getattr(timezone, "key", "")
+    if key:
+        yield str(key)
+
+    try:
+        localtime = Path("/etc/localtime").resolve(strict=True)
+    except OSError:
+        pass
+    else:
+        name = _zoneinfo_name_from_path(localtime)
+        if name:
+            yield name
+
+    try:
+        timezone_file = Path("/etc/timezone").read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        pass
+    else:
+        name = timezone_file.splitlines()[0].strip() if timezone_file else ""
+        if name:
+            yield name
+
+
+def _normalize_timezone_candidate(value: object) -> str:
+    name = str(value or "").strip()
+    if name.startswith(":"):
+        name = name[1:]
+    if name.startswith("/"):
+        name = _zoneinfo_name_from_path(Path(name))
+    return name
+
+
+def _validate_path_timezone(value: object) -> str:
+    name = _normalize_timezone_candidate(value)
+    if name in UTC_TIMEZONE_NAMES:
+        return "UTC"
+    try:
+        ZoneInfo(name)
+    except (ValueError, ZoneInfoNotFoundError) as error:
+        raise ValueError(f"Unknown path_timezone: {name}") from error
+    return name
+
+
+def detect_local_timezone() -> str:
+    """Return the local IANA timezone name, falling back safely to UTC."""
+    for candidate in _local_timezone_candidates():
+        try:
+            return _validate_path_timezone(candidate)
+        except ValueError:
+            continue
+    return "UTC"
+
+
+def _path_timezone(value: object) -> str:
+    name = _normalize_timezone_candidate(value)
+    if not name:
+        return detect_local_timezone()
+    return _validate_path_timezone(name)
 
 
 def load_config(path: Path | None = None) -> Config:
@@ -130,16 +229,23 @@ def load_config(path: Path | None = None) -> Config:
                 server_raw.get("token_env") or "AGENT_SESSION_EXPORTER_TOKEN"
             ),
         ),
+        path_timezone=_path_timezone(raw.get("path_timezone")),
     )
 
 
-def render_initial_config(vault_path: Path, destination: str) -> str:
+def render_initial_config(
+    vault_path: Path,
+    destination: str,
+    path_timezone: str | None = None,
+) -> str:
     """Render a minimal initial TOML configuration."""
     escaped_vault = json.dumps(str(vault_path.expanduser().resolve()))
     escaped_device = json.dumps(socket.gethostname())
+    escaped_timezone = json.dumps(_path_timezone(path_timezone))
     return (
         f"vault_path = {escaped_vault}\n"
         f'destination = "{destination.strip("/")}"\n'
+        f"path_timezone = {escaped_timezone}\n"
         f"device_id = {escaped_device}\n"
         "redact = true\n"
         "include_tool_details = false\n"
@@ -266,6 +372,24 @@ def _first_string(payload: Mapping[str, Any], keys: Iterable[str]) -> str:
     return ""
 
 
+def canonical_event_name(value: object) -> str:
+    """Return the canonical spelling for a known hook event name."""
+    text = str(value).strip()
+    return CANONICAL_EVENT_NAMES.get(text.casefold(), text or "Unknown")
+
+
+def _single_workspace_root(payload: Mapping[str, Any]) -> str:
+    roots = payload.get("workspace_roots") or payload.get("workspaceRoots")
+    if not isinstance(roots, list):
+        return ""
+    values = [
+        str(root).strip()
+        for root in roots
+        if root is not None and str(root).strip()
+    ]
+    return values[0] if len(values) == 1 else ""
+
+
 def normalize_event(
     payload: Mapping[str, Any],
     source: str,
@@ -283,13 +407,18 @@ def normalize_event(
     if not session_id:
         session_id = event_fingerprint(cleaned_payload)[:24]
 
-    event_name = (
+    raw_event_name = (
         _first_string(
             cleaned_payload,
             ["hook_event_name", "event_name", "event", "type"],
         )
         or "Unknown"
     )
+    event_name = canonical_event_name(raw_event_name)
+    for event_key in ("hook_event_name", "event_name", "event", "type"):
+        if str(cleaned_payload.get(event_key) or "").strip() == raw_event_name:
+            cleaned_payload[event_key] = event_name
+            break
     occurred_at = (
         _first_string(
             cleaned_payload,
@@ -298,6 +427,8 @@ def normalize_event(
         or now_iso()
     )
     cwd = _first_string(cleaned_payload, ["cwd", "working_directory"])
+    if not cwd:
+        cwd = _single_workspace_root(cleaned_payload)
     project_info = (
         inspect_project(cwd, config.project_aliases)
         if cwd and inspect_cwd
@@ -567,6 +698,12 @@ class EventStore:
             "SELECT * FROM render_state WHERE session_key = ?",
             (session_key,),
         ).fetchone()
+
+    def list_render_states(self) -> list[sqlite3.Row]:
+        """Return all render states in stable path order."""
+        return self.connection.execute(
+            "SELECT * FROM render_state ORDER BY note_path, session_key"
+        ).fetchall()
 
     def set_render_state(
         self,

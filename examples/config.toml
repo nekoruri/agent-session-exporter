@@ -1,5 +1,6 @@
 vault_path = "/absolute/path/to/Obsidian/Vault"
 destination = "ai-sessions"
+path_timezone = "UTC"
 device_id = "my-device"
 redact = true
 include_tool_details = false
