@@ -253,16 +253,26 @@ def _verified_generated_hash(path: Path, expected_hash: str) -> str:
     return ""
 
 
-def _generated_note_identity(content: str) -> tuple[str, str, str] | None:
-    lines = content.splitlines()
-    if not lines or lines[0] != "---":
+def _generated_note_parts(content: str) -> tuple[list[str], str] | None:
+    """Split frontmatter using only the LF delimiters emitted by the renderer."""
+    opening = "---\n"
+    closing = "\n---\n"
+    if not content.startswith(opening):
         return None
+    end = content.find(closing, len(opening))
+    if end < 0:
+        return None
+    lines = content[len(opening) : end].split("\n")
+    return lines, content[end + len(closing) :]
+
+
+def _generated_note_identity(content: str) -> tuple[str, str, str] | None:
+    parts = _generated_note_parts(content)
+    if parts is None:
+        return None
+    lines, _ = parts
     values: dict[str, str] = {}
-    closed = False
-    for line in lines[1:]:
-        if line == "---":
-            closed = True
-            break
+    for line in lines:
         key, separator, encoded = line.partition(":")
         if not separator or key not in NOTE_IDENTITY_KEYS:
             continue
@@ -273,20 +283,19 @@ def _generated_note_identity(content: str) -> tuple[str, str, str] | None:
         if not isinstance(value, str):
             return None
         values[key] = str(value)
-    if not closed or any(key not in values for key in NOTE_IDENTITY_KEYS):
+    if any(key not in values for key in NOTE_IDENTITY_KEYS):
         return None
     return tuple(values[key] for key in NOTE_IDENTITY_KEYS)
 
 
 def _generated_note_body(content: str) -> str | None:
     """Return content after generated frontmatter, marker, and title."""
-    lines = content.splitlines(keepends=True)
-    if not lines or lines[0].rstrip("\r\n") != "---":
+    parts = _generated_note_parts(content)
+    if parts is None:
         return None
+    lines, rendered = parts
     title: str | None = None
-    index = 1
-    while index < len(lines) and lines[index].rstrip("\r\n") != "---":
-        line = lines[index].rstrip("\r\n")
+    for line in lines:
         key, separator, encoded = line.partition(":")
         if separator and key == "title":
             try:
@@ -296,20 +305,12 @@ def _generated_note_body(content: str) -> str | None:
             if not isinstance(value, str):
                 return None
             title = value
-        index += 1
-    if index >= len(lines) or title is None:
+    if title is None:
         return None
-    index += 1
-    expected = ("", GENERATED_MARKER, "")
-    for value in expected:
-        if index >= len(lines) or lines[index].rstrip("\r\n") != value:
-            return None
-        index += 1
-    rendered = "".join(lines[index:])
-    heading = f"# {title}\n\n"
-    if not rendered.startswith(heading):
+    prefix = f"\n{GENERATED_MARKER}\n\n# {title}\n\n"
+    if not rendered.startswith(prefix):
         return None
-    return rendered[len(heading) :]
+    return rendered[len(prefix) :]
 
 
 def _stale_backup_path(
@@ -484,13 +485,20 @@ def migrate_render_state(
                 new_path=new_note_path,
                 backup_path=backup_note_path,
             )
-            migrations.append(migration)
             if not apply:
+                migrations.append(migration)
                 continue
             if operation == "move":
                 new_target.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(old_target, new_target)
             elif operation == "replace-append-only":
+                problem = _verified_generated_hash(new_target, new_hash)
+                if problem:
+                    errors.append(
+                        "destination changed during migration: "
+                        f"{new_target}: {problem}"
+                    )
+                    continue
                 os.replace(old_target, new_target)
             elif operation == "replace-stale":
                 if backup_note_path is None:
@@ -506,6 +514,7 @@ def migrate_render_state(
                 expected_hash,
                 new_note_path.as_posix(),
             )
+            migrations.append(migration)
     return migrations, errors
 
 

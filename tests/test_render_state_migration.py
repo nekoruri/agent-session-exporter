@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import tempfile
 import unittest
@@ -8,6 +9,7 @@ from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from unittest.mock import patch
 
+from agent_session_exporter import renderer as renderer_module
 from agent_session_exporter.core import (
     CollectorConfig,
     Config,
@@ -151,6 +153,44 @@ class RenderStateMigrationTest(unittest.TestCase):
             self.assertEqual(str(state["note_path"]), new_path.as_posix())
             self.assertEqual(sync_vault(config), (0, 1))
 
+    def test_refuses_append_only_replacement_after_destination_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old_config, old_path, key = create_old_note(root)
+            config = replace(old_config, destination="ai-sessions")
+            old_target = config.vault_path / Path(*old_path.parts)
+            current = old_target.read_text(encoding="utf-8")
+            new_path = PurePosixPath("ai-sessions", *old_path.parts[-3:])
+            new_target = config.vault_path / Path(*new_path.parts)
+            new_target.parent.mkdir(parents=True)
+            stale = current.replace("\nMove this note.\n", "\n", 1)
+            new_target.write_text(stale, encoding="utf-8")
+            concurrent = f"{stale}\nConcurrent edit.\n"
+            real_verify = renderer_module._verified_generated_hash
+            changed = False
+
+            def verify_after_change(path: Path, expected_hash: str) -> str:
+                nonlocal changed
+                if Path(path) == new_target and not changed:
+                    new_target.write_text(concurrent, encoding="utf-8")
+                    changed = True
+                return real_verify(path, expected_hash)
+
+            with patch(
+                "agent_session_exporter.renderer._verified_generated_hash",
+                side_effect=verify_after_change,
+            ):
+                migrations, errors = migrate_render_state(config, apply=True)
+
+            self.assertEqual(migrations, [])
+            self.assertEqual(len(errors), 1)
+            self.assertIn("destination changed during migration", errors[0])
+            self.assertTrue(old_target.exists())
+            self.assertEqual(new_target.read_text(encoding="utf-8"), concurrent)
+            with EventStore(config.state_dir) as store:
+                state = store.get_render_state(key)
+            self.assertEqual(str(state["note_path"]), old_path.as_posix())
+
     def test_replaces_append_only_note_with_multiline_title(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -158,13 +198,14 @@ class RenderStateMigrationTest(unittest.TestCase):
             config = replace(old_config, destination="ai-sessions")
             old_target = config.vault_path / Path(*old_path.parts)
             current = old_target.read_text(encoding="utf-8")
+            title = "First\r\nSecond\u0085Third\u2028Fourth\u2029Fifth"
             current = current.replace(
                 'title: "Move this note."',
-                'title: "First line\\r\\nSecond line"',
+                f"title: {json.dumps(title, ensure_ascii=False)}",
                 1,
             ).replace(
                 "# Move this note.\n",
-                "# First line\r\nSecond line\n",
+                f"# {title}\n",
                 1,
             )
             old_target.write_text(current, encoding="utf-8")
