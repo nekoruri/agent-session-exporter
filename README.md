@@ -125,6 +125,10 @@ ase hooks --source claude-cloud \
 `UserPromptSubmit`、`MessageDisplay`、`Stop`、`StopFailure`、
 `SessionEnd`です。
 
+既知のhookイベント名は大文字・小文字の表記揺れを正規化します。`cwd`がなく
+`workspace_roots`が1件だけ含まれるイベントでは、そのworkspaceをproject判定に
+利用します。複数workspaceから代表を推測することはありません。
+
 Vault端末の`config.toml`:
 
 ```toml
