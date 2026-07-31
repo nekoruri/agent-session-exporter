@@ -33,7 +33,12 @@ from .remote import (
     push_event,
     sync_codex_cloud,
 )
-from .renderer import sync_session, sync_vault
+from .renderer import (
+    migrate_render_state,
+    render_state_path_issues,
+    sync_session,
+    sync_vault,
+)
 from .server import serve
 
 
@@ -90,6 +95,16 @@ def _build_parser() -> argparse.ArgumentParser:
     capture.add_argument("--verbose", action="store_true")
 
     subparsers.add_parser("sync", help="render changed sessions to the Vault")
+
+    migrate = subparsers.add_parser(
+        "migrate-destination",
+        help="move generated notes and repair render paths",
+    )
+    migrate.add_argument(
+        "--apply",
+        action="store_true",
+        help="apply the displayed plan (default: dry-run)",
+    )
 
     server = subparsers.add_parser("serve", help="run the HTTP collector")
     server.add_argument(
@@ -263,6 +278,15 @@ def _doctor(config_path: Path) -> int:
     except OSError:
         state_ok = False
     checks.append(("state", state_ok, str(config.state_dir)))
+    if state_ok and config.vault_path is not None and config.vault_path.exists():
+        render_issues = render_state_path_issues(config)
+        checks.append(
+            (
+                "render paths",
+                not render_issues,
+                "ok" if not render_issues else "; ".join(render_issues[:3]),
+            )
+        )
     checks.append(
         (
             "codex CLI",
@@ -336,6 +360,21 @@ def run(arguments: Sequence[str] | None = None) -> int:
         written, unchanged = sync_vault(config)
         print(f"written={written} unchanged={unchanged}")
         return 0
+    if args.command == "migrate-destination":
+        migrations, errors = migrate_render_state(config, apply=args.apply)
+        prefix = "apply" if args.apply else "dry-run"
+        for migration in migrations:
+            print(
+                f"{prefix}: {migration.operation} "
+                f"{migration.old_path} -> {migration.new_path}"
+            )
+        for error in errors:
+            print(f"error: {error}", file=sys.stderr)
+        print(
+            f"planned={len(migrations)} applied="
+            f"{len(migrations) if args.apply else 0} errors={len(errors)}"
+        )
+        return 1 if errors else 0
     if args.command == "serve":
         serve(_override_server(config, args))
         return 0

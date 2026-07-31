@@ -97,6 +97,18 @@ ase sync
 
 cron、systemd timer、launchdなどから定期実行できます。
 
+`destination`を変更した場合、既存セッションの保存先はrender stateに残ります。
+まずdry-runで移動・再紐付けの対象を確認し、問題がなければ適用します。
+
+```bash
+ase doctor
+ase migrate-destination
+ase migrate-destination --apply
+```
+
+移動対象と現在の内容が異なる場合や、生成物ではないMarkdownがある場合は
+上書きせずエラーにします。
+
 ## 3. Claude Cloud / 別マシンから収集
 
 collectorはSQLiteへイベントを受け取るだけです。Vaultは公開せず、
