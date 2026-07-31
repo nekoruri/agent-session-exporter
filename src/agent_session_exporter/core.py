@@ -432,7 +432,8 @@ class EventStore:
                 session_key TEXT PRIMARY KEY,
                 content_hash TEXT NOT NULL,
                 note_path TEXT NOT NULL,
-                rendered_at TEXT NOT NULL
+                rendered_at TEXT NOT NULL,
+                source_hash TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS metadata (
@@ -441,6 +442,15 @@ class EventStore:
             );
             """
         )
+        render_state_columns = {
+            str(row["name"])
+            for row in self.connection.execute("PRAGMA table_info(render_state)")
+        }
+        if "source_hash" not in render_state_columns:
+            self.connection.execute(
+                "ALTER TABLE render_state "
+                "ADD COLUMN source_hash TEXT NOT NULL DEFAULT ''"
+            )
         self.connection.commit()
         try:
             self.path.chmod(0o600)
@@ -563,19 +573,30 @@ class EventStore:
         session_key: str,
         content_hash: str,
         note_path: str,
+        *,
+        source_hash: str | None = None,
+        rendered_at: str | None = None,
     ) -> None:
         """Persist the last rendered content hash and path."""
         self.connection.execute(
             """
             INSERT INTO render_state (
-                session_key, content_hash, note_path, rendered_at
-            ) VALUES (?, ?, ?, ?)
+                session_key, content_hash, note_path, rendered_at, source_hash
+            ) VALUES (?, ?, ?, ?, COALESCE(?, ''))
             ON CONFLICT(session_key) DO UPDATE SET
                 content_hash = excluded.content_hash,
                 note_path = excluded.note_path,
-                rendered_at = excluded.rendered_at
+                rendered_at = excluded.rendered_at,
+                source_hash = COALESCE(?, render_state.source_hash)
             """,
-            (session_key, content_hash, note_path, now_iso()),
+            (
+                session_key,
+                content_hash,
+                note_path,
+                rendered_at or now_iso(),
+                source_hash,
+                source_hash,
+            ),
         )
         self.connection.commit()
 
