@@ -20,6 +20,7 @@ from agent_session_exporter.core import (
     Config,
     EventStore,
     ServerConfig,
+    detect_local_timezone,
     load_config,
     normalize_event,
     render_initial_config,
@@ -209,10 +210,68 @@ class CoreRendererTest(unittest.TestCase):
             self.assertEqual(updated.event_count, 2)
 
     def test_default_destination_is_at_the_vault_root(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch(
+                "agent_session_exporter.core.detect_local_timezone",
+                return_value="Asia/Tokyo",
+            ),
+        ):
             config = load_config(Path(directory) / "missing.toml")
         self.assertEqual(config.destination, "ai-sessions")
-        self.assertEqual(config.path_timezone, "UTC")
+        self.assertEqual(config.path_timezone, "Asia/Tokyo")
+
+    def test_config_without_path_timezone_uses_detected_local_timezone(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.toml"
+            config_path.write_text('destination = "archive"\n', encoding="utf-8")
+            with patch(
+                "agent_session_exporter.core.detect_local_timezone",
+                return_value="America/New_York",
+            ) as detect:
+                config = load_config(config_path)
+
+        self.assertEqual(config.path_timezone, "America/New_York")
+        detect.assert_called_once_with()
+
+    def test_detect_local_timezone_skips_invalid_hints_and_falls_back(self) -> None:
+        with patch(
+            "agent_session_exporter.core._local_timezone_candidates",
+            return_value=("Not/A-Timezone", "Asia/Tokyo"),
+        ):
+            self.assertEqual(detect_local_timezone(), "Asia/Tokyo")
+        with patch(
+            "agent_session_exporter.core._local_timezone_candidates",
+            return_value=("Not/A-Timezone",),
+        ):
+            self.assertEqual(detect_local_timezone(), "UTC")
+
+    def test_init_writes_detected_local_timezone(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "config.toml"
+            with (
+                patch(
+                    "agent_session_exporter.core.detect_local_timezone",
+                    return_value="Asia/Tokyo",
+                ),
+                patch("sys.stdout", new_callable=io.StringIO),
+            ):
+                exit_code = run(
+                    [
+                        "--config",
+                        str(config_path),
+                        "init",
+                        "--vault",
+                        str(root / "vault"),
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            self.assertIn(
+                'path_timezone = "Asia/Tokyo"',
+                config_path.read_text(encoding="utf-8"),
+            )
 
     def test_path_timezone_controls_note_directory_and_filename(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

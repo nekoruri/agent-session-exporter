@@ -30,6 +30,7 @@ SECRET_VALUE_RES = [
     re.compile(r"\bsk-[A-Za-z0-9_-]{12,}"),
     re.compile(r"\b(?:gh[opsu]_|github_pat_)[A-Za-z0-9_]{12,}"),
 ]
+UTC_TIMEZONE_NAMES = {"UTC", "Etc/UTC", "Etc/GMT", "GMT"}
 CANONICAL_EVENT_NAMES = {
     name.casefold(): name
     for name in (
@@ -107,15 +108,85 @@ def _expand_optional_path(value: Any) -> Path | None:
     return Path(str(value)).expanduser().resolve()
 
 
-def _path_timezone(value: object) -> str:
-    name = str(value or "UTC").strip()
-    if name == "UTC":
-        return name
+def _zoneinfo_name_from_path(path: Path) -> str:
+    """Return an IANA key from a path below a zoneinfo directory."""
+    normalized = path.as_posix()
+    marker = "/zoneinfo/"
+    if marker not in normalized:
+        return ""
+    name = normalized.split(marker, 1)[1].strip("/")
+    for prefix in ("posix/", "right/"):
+        if name.startswith(prefix):
+            name = name[len(prefix) :]
+            break
+    return name
+
+
+def _local_timezone_candidates() -> Iterable[str]:
+    """Yield local timezone hints without requiring third-party packages."""
+    environment = os.environ.get("TZ", "").strip()
+    if environment:
+        yield environment
+
+    timezone = datetime.now().astimezone().tzinfo
+    key = getattr(timezone, "key", "")
+    if key:
+        yield str(key)
+
+    try:
+        localtime = Path("/etc/localtime").resolve(strict=True)
+    except OSError:
+        pass
+    else:
+        name = _zoneinfo_name_from_path(localtime)
+        if name:
+            yield name
+
+    try:
+        timezone_file = Path("/etc/timezone").read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        pass
+    else:
+        name = timezone_file.splitlines()[0].strip() if timezone_file else ""
+        if name:
+            yield name
+
+
+def _normalize_timezone_candidate(value: object) -> str:
+    name = str(value or "").strip()
+    if name.startswith(":"):
+        name = name[1:]
+    if name.startswith("/"):
+        name = _zoneinfo_name_from_path(Path(name))
+    return name
+
+
+def _validate_path_timezone(value: object) -> str:
+    name = _normalize_timezone_candidate(value)
+    if name in UTC_TIMEZONE_NAMES:
+        return "UTC"
     try:
         ZoneInfo(name)
-    except ZoneInfoNotFoundError as error:
+    except (ValueError, ZoneInfoNotFoundError) as error:
         raise ValueError(f"Unknown path_timezone: {name}") from error
     return name
+
+
+def detect_local_timezone() -> str:
+    """Return the local IANA timezone name, falling back safely to UTC."""
+    for candidate in _local_timezone_candidates():
+        try:
+            return _validate_path_timezone(candidate)
+        except ValueError:
+            continue
+    return "UTC"
+
+
+def _path_timezone(value: object) -> str:
+    name = _normalize_timezone_candidate(value)
+    if not name:
+        return detect_local_timezone()
+    return _validate_path_timezone(name)
 
 
 def load_config(path: Path | None = None) -> Config:
@@ -162,14 +233,19 @@ def load_config(path: Path | None = None) -> Config:
     )
 
 
-def render_initial_config(vault_path: Path, destination: str) -> str:
+def render_initial_config(
+    vault_path: Path,
+    destination: str,
+    path_timezone: str | None = None,
+) -> str:
     """Render a minimal initial TOML configuration."""
     escaped_vault = json.dumps(str(vault_path.expanduser().resolve()))
     escaped_device = json.dumps(socket.gethostname())
+    escaped_timezone = json.dumps(_path_timezone(path_timezone))
     return (
         f"vault_path = {escaped_vault}\n"
         f'destination = "{destination.strip("/")}"\n'
-        'path_timezone = "UTC"\n'
+        f"path_timezone = {escaped_timezone}\n"
         f"device_id = {escaped_device}\n"
         "redact = true\n"
         "include_tool_details = false\n"
