@@ -17,10 +17,39 @@ from agent_session_exporter.core import (
     EventStore,
     ServerConfig,
 )
-from agent_session_exporter.server import _handler
+from agent_session_exporter.server import _handler, _remote_envelope
 
 
 class CollectorTest(unittest.TestCase):
+    def test_remote_envelope_normalizes_known_event_name(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = Config(
+                vault_path=None,
+                destination="archive",
+                state_dir=root / "state",
+                device_id="collector",
+                redact=True,
+                include_tool_details=False,
+                sync_on_capture=True,
+                project_aliases={},
+                collector=CollectorConfig(),
+                server=ServerConfig(),
+            )
+            envelope = _remote_envelope(
+                {
+                    "source": "claude-code",
+                    "device_id": "desktop",
+                    "session_id": "remote-1",
+                    "event_name": "sessionEnd",
+                    "occurred_at": "2026-01-01T00:00:00Z",
+                    "payload": {"hook_event_name": "sessionEnd"},
+                },
+                config,
+            )
+            self.assertEqual(envelope["event_name"], "SessionEnd")
+            self.assertEqual(envelope["payload"]["hook_event_name"], "SessionEnd")
+
     def test_authenticated_hook_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

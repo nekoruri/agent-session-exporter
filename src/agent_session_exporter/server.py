@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from .core import (
     Config,
     EventStore,
+    canonical_event_name,
     event_fingerprint,
     normalize_event,
     now_iso,
@@ -40,11 +41,16 @@ def _remote_envelope(value: Mapping[str, Any], config: Config) -> dict[str, Any]
     if not isinstance(payload, Mapping):
         raise TypeError("Envelope payload must be a JSON object.")
     cleaned_payload = redact_value(dict(payload)) if config.redact else dict(payload)
+    event_name = canonical_event_name(value["event_name"])
+    for event_key in ("hook_event_name", "event_name", "event", "type"):
+        if canonical_event_name(cleaned_payload.get(event_key)) == event_name:
+            cleaned_payload[event_key] = event_name
+            break
     envelope: dict[str, Any] = {
         "source": str(value["source"]),
         "device_id": str(value["device_id"]),
         "session_id": str(value["session_id"]),
-        "event_name": str(value["event_name"]),
+        "event_name": event_name,
         "occurred_at": str(value["occurred_at"]),
         "cwd": str(value.get("cwd") or ""),
         "project": str(value.get("project") or "unknown"),

@@ -137,6 +137,10 @@ ase hooks --source claude-cloud \
 `UserPromptSubmit`、`MessageDisplay`、`Stop`、`StopFailure`、
 `SessionEnd`です。
 
+既知のhookイベント名は大文字・小文字の表記揺れを正規化します。`cwd`がなく
+`workspace_roots`が1件だけ含まれるイベントでは、そのworkspaceをproject判定に
+利用します。複数workspaceから代表を推測することはありません。
+
 Vault端末の`config.toml`:
 
 ```toml
@@ -191,6 +195,15 @@ export形式が変更された場合はadapterの更新が必要です。
 hookはまずローカルDBへ書き、その後remote collectorへbest-effortで転送します。
 ネットワーク障害でエージェント本体を止めません。重複イベントはfingerprintで
 排除し、`ase sync`は変更されたセッションだけを原子的に書き換えます。
+
+ノートのタイトルはhookが渡す最初の実ユーザープロンプトを優先します。
+AGENTS.mdやenvironment contextなどの制御用テキストは本文へ残しますが、
+タイトル候補には使いません。
+
+生成するfrontmatterには、ingest判定向けの`content_kind`、`message_count`、
+`event_count`、`revision`も含まれます。`content_kind = "metadata_only"`なら
+会話本文を取得できなかったセッションです。`revision`はセッション内のイベントが
+増えると変わるため、digestなど下流生成物の更新判定に利用できます。
 
 機密情報対策として、token、password、API key等の名前を持つJSON fieldと、
 代表的なcredential文字列を取り込み時にredactします。ただし万能ではありません。

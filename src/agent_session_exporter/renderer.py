@@ -20,6 +20,12 @@ GENERATED_MARKER = (
 SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 YEAR_RE = re.compile(r"^[0-9]{4}$")
 MONTH_RE = re.compile(r"^[0-9]{2}$")
+CONTROL_TITLE_PREFIXES = (
+    "# agents.md instructions",
+    "<environment_context>",
+    "<command-",
+    "<recommended_plugins>",
+)
 
 
 @dataclass(frozen=True)
@@ -35,6 +41,8 @@ class RenderStateMigration:
 def _yaml_scalar(value: object) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return json.dumps(value)
     return json.dumps(str(value), ensure_ascii=False)
 
 
@@ -51,11 +59,13 @@ def _parse_date(value: str) -> datetime:
         return datetime.now().astimezone()
 
 
-def _first_user_text(messages: list[Message]) -> str:
-    return next(
-        (message.text for message in messages if message.role == "user"),
-        "",
-    )
+def _title_candidate(value: object) -> str:
+    text = " ".join(str(value).split())
+    if not text:
+        return ""
+    if text.casefold().startswith(CONTROL_TITLE_PREFIXES):
+        return ""
+    return text[:120]
 
 
 def session_title(document: SessionDocument) -> str:
@@ -63,9 +73,15 @@ def session_title(document: SessionDocument) -> str:
     imported = document.metadata.get("imported_title")
     if imported:
         return str(imported).strip()[:120]
-    first_user = " ".join(_first_user_text(document.messages).split())
-    if first_user:
-        return first_user[:120]
+    title_hint = _title_candidate(document.metadata.get("title_hint", ""))
+    if title_hint:
+        return title_hint
+    for message in document.messages:
+        if message.role != "user":
+            continue
+        candidate = _title_candidate(message.text)
+        if candidate:
+            return candidate
     return f"{document.source} session — {document.project}"
 
 
@@ -84,6 +100,12 @@ def render_markdown(document: SessionDocument) -> str:
         "started_at": document.started_at,
         "ended_at": document.ended_at,
         "status": document.status,
+        "content_kind": (
+            "transcript" if document.messages else "metadata_only"
+        ),
+        "message_count": len(document.messages),
+        "event_count": document.event_count,
+        "revision": document.revision,
         "archived_at": document.ended_at,
         "tags": "[ai-session]",
     }
@@ -130,7 +152,8 @@ def render_markdown(document: SessionDocument) -> str:
     metadata = {
         key: value
         for key, value in document.metadata.items()
-        if key not in {"diff", "imported_title", "transcript_path", "git"}
+        if key
+        not in {"diff", "imported_title", "title_hint", "transcript_path", "git"}
         and value not in ("", None)
     }
     if metadata:
