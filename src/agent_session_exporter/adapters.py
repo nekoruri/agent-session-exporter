@@ -265,6 +265,20 @@ def messages_from_hook_events(events: list[StoredEvent]) -> list[Message]:
     return _deduplicate(messages)
 
 
+def _first_hook_user_prompt(events: Iterable[StoredEvent]) -> str:
+    for event in events:
+        if event.event_name != "UserPromptSubmit":
+            continue
+        prompt = (
+            event.payload.get("prompt")
+            or event.payload.get("user_prompt")
+            or event.payload.get("message")
+        )
+        if isinstance(prompt, str) and prompt.strip():
+            return prompt.strip()
+    return ""
+
+
 def _imported_document(
     event: StoredEvent,
     base: SessionDocument,
@@ -338,6 +352,7 @@ def build_session_document(events: list[StoredEvent]) -> SessionDocument:
         raise ValueError("Cannot build a session without events.")
     first = events[0]
     last = events[-1]
+    title_hint = _first_hook_user_prompt(events)
     document = SessionDocument(
         source=first.source,
         device_id=first.device_id,
@@ -354,7 +369,7 @@ def build_session_document(events: list[StoredEvent]) -> SessionDocument:
         status="active",
         event_count=len(events),
         revision=_session_revision(events),
-        metadata={},
+        metadata={"title_hint": title_hint} if title_hint else {},
     )
 
     if any(event.event_name == "SessionEnd" for event in events):

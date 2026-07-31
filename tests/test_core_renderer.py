@@ -23,7 +23,7 @@ from agent_session_exporter.core import (
     normalize_event,
     render_initial_config,
 )
-from agent_session_exporter.renderer import sync_vault
+from agent_session_exporter.renderer import session_title, sync_vault
 
 
 def config_for(root: Path) -> Config:
@@ -236,6 +236,112 @@ class CoreRendererTest(unittest.TestCase):
             )
             messages, _ = parse_claude_transcript(claude_path)
             self.assertEqual([message.text for message in messages], ["Hello", "Hi"])
+
+    def test_title_prefers_hook_prompt_over_transcript_context(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = config_for(root)
+            transcript = root / "codex-title.jsonl"
+            rows = [
+                {
+                    "type": "event_msg",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "payload": {
+                        "type": "user_message",
+                        "message": (
+                            "# AGENTS.md instructions for /workspace\n"
+                            "<environment_context>generated</environment_context>"
+                        ),
+                    },
+                },
+                {
+                    "type": "event_msg",
+                    "timestamp": "2026-01-01T00:00:01Z",
+                    "payload": {
+                        "type": "user_message",
+                        "message": "Actual question from transcript",
+                    },
+                },
+            ]
+            transcript.write_text(
+                "\n".join(json.dumps(row) for row in rows) + "\n",
+                encoding="utf-8",
+            )
+            envelope = normalize_event(
+                {
+                    "session_id": "title-1",
+                    "hook_event_name": "UserPromptSubmit",
+                    "timestamp": "2026-01-01T00:00:01Z",
+                    "transcript_path": str(transcript),
+                    "prompt": "Actual question from hook",
+                },
+                "codex-cli",
+                config,
+            )
+            with EventStore(config.state_dir) as store:
+                store.add_event(envelope)
+                document = build_session_document(
+                    store.session_events("codex-cli", "test-device", "title-1")
+                )
+
+            self.assertEqual(session_title(document), "Actual question from hook")
+            self.assertEqual(
+                [message.text for message in document.messages[:2]],
+                [
+                    (
+                        "# AGENTS.md instructions for /workspace\n"
+                        "<environment_context>generated</environment_context>"
+                    ),
+                    "Actual question from transcript",
+                ],
+            )
+
+    def test_title_skips_control_messages_without_hook_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = config_for(root)
+            transcript = root / "claude-title.jsonl"
+            rows = [
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "<environment_context>generated"}
+                        ],
+                    },
+                },
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Actual transcript question"}
+                        ],
+                    },
+                },
+            ]
+            transcript.write_text(
+                "\n".join(json.dumps(row) for row in rows) + "\n",
+                encoding="utf-8",
+            )
+            envelope = normalize_event(
+                {
+                    "session_id": "title-2",
+                    "hook_event_name": "SessionEnd",
+                    "timestamp": "2026-01-01T00:01:00Z",
+                    "transcript_path": str(transcript),
+                },
+                "claude-code",
+                config,
+            )
+            with EventStore(config.state_dir) as store:
+                store.add_event(envelope)
+                document = build_session_document(
+                    store.session_events("claude-code", "test-device", "title-2")
+                )
+
+            self.assertEqual(session_title(document), "Actual transcript question")
 
     def test_streamed_cloud_messages_keep_turn_order(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

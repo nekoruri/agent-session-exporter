@@ -180,6 +180,10 @@ hookはまずローカルDBへ書き、その後remote collectorへbest-effort�
 ネットワーク障害でエージェント本体を止めません。重複イベントはfingerprintで
 排除し、`ase sync`は変更されたセッションだけを原子的に書き換えます。
 
+ノートのタイトルはhookが渡す最初の実ユーザープロンプトを優先します。
+AGENTS.mdやenvironment contextなどの制御用テキストは本文へ残しますが、
+タイトル候補には使いません。
+
 生成するfrontmatterには、ingest判定向けの`content_kind`、`message_count`、
 `event_count`、`revision`も含まれます。`content_kind = "metadata_only"`なら
 会話本文を取得できなかったセッションです。`revision`はセッション内のイベントが
