@@ -10,6 +10,7 @@ import urllib.request
 from collections.abc import Mapping
 from typing import Any
 
+from . import __version__
 from .core import (
     Config,
     EventStore,
@@ -46,7 +47,10 @@ def _request_json(
     token: str = "",
     timeout: float = 10.0,
 ) -> dict[str, Any]:
-    headers = {"Accept": "application/json"}
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": f"agent-session-exporter/{__version__}",
+    }
     if token:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, headers=headers, method="GET")

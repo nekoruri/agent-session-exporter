@@ -105,6 +105,10 @@ class ClaudeCloudTest(unittest.TestCase):
         request = urlopen.call_args.args[0]
         self.assertEqual(request.get_method(), "GET")
         self.assertEqual(request.get_header("Authorization"), "Bearer pull-token")
+        self.assertEqual(
+            request.get_header("User-agent"),
+            "agent-session-exporter/0.1.0",
+        )
         self.assertEqual(urlopen.call_args.kwargs["timeout"], 4.0)
 
     def test_request_json_reports_http_error(self) -> None:
