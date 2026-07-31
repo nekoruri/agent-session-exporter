@@ -32,7 +32,7 @@ NOTE_IDENTITY_KEYS = ("source", "session_id", "device")
 
 @dataclass(frozen=True)
 class RenderStateMigration:
-    """One safe note move, rebind, or stale-target replacement."""
+    """One safe note move, rebind, or generated-target replacement."""
 
     session_key: str
     operation: str
@@ -278,6 +278,30 @@ def _generated_note_identity(content: str) -> tuple[str, str, str] | None:
     return tuple(values[key] for key in NOTE_IDENTITY_KEYS)
 
 
+def _generated_note_body(content: str) -> str | None:
+    """Return content after generated frontmatter, marker, and title."""
+    lines = content.splitlines(keepends=True)
+    if not lines or lines[0].rstrip("\r\n") != "---":
+        return None
+    index = 1
+    while index < len(lines) and lines[index].rstrip("\r\n") != "---":
+        index += 1
+    if index >= len(lines):
+        return None
+    index += 1
+    expected = ("", GENERATED_MARKER, "")
+    for value in expected:
+        if index >= len(lines) or lines[index].rstrip("\r\n") != value:
+            return None
+        index += 1
+    if index >= len(lines) or not lines[index].rstrip("\r\n").startswith("# "):
+        return None
+    index += 1
+    if index >= len(lines) or lines[index].rstrip("\r\n") != "":
+        return None
+    return "".join(lines[index + 1 :])
+
+
 def _stale_backup_path(
     note_path: PurePosixPath,
     content_hash: str,
@@ -387,25 +411,37 @@ def migrate_render_state(
                             f"{new_target}"
                         )
                         continue
-                    backup_note_path = _stale_backup_path(
-                        new_note_path,
-                        new_hash,
-                    )
-                    backup_target = _safe_note_path(
-                        config.vault_path,
-                        backup_note_path,
-                    )
-                    if backup_target.is_file():
-                        problem = _verified_generated_hash(
-                            backup_target,
+                    old_body = _generated_note_body(old_content)
+                    new_body = _generated_note_body(new_content)
+                    if old_body is None or new_body is None:
+                        errors.append(
+                            "cannot compare generated note body: "
+                            f"{new_target}"
+                        )
+                        continue
+                    if old_body.startswith(new_body):
+                        operation = "replace-append-only"
+                    else:
+                        backup_note_path = _stale_backup_path(
+                            new_note_path,
                             new_hash,
                         )
-                        if problem:
-                            errors.append(
-                                f"stale backup conflicts: {backup_target}: {problem}"
+                        backup_target = _safe_note_path(
+                            config.vault_path,
+                            backup_note_path,
+                        )
+                        if backup_target.is_file():
+                            problem = _verified_generated_hash(
+                                backup_target,
+                                new_hash,
                             )
-                            continue
-                    operation = "replace-stale"
+                            if problem:
+                                errors.append(
+                                    "stale backup conflicts: "
+                                    f"{backup_target}: {problem}"
+                                )
+                                continue
+                        operation = "replace-stale"
                 else:
                     errors.append(
                         f"content differs from render state: {new_target}"
@@ -435,6 +471,8 @@ def migrate_render_state(
                 continue
             if operation == "move":
                 new_target.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(old_target, new_target)
+            elif operation == "replace-append-only":
                 os.replace(old_target, new_target)
             elif operation == "replace-stale":
                 if backup_note_path is None:

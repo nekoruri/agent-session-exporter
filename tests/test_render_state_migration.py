@@ -111,7 +111,7 @@ class RenderStateMigrationTest(unittest.TestCase):
                 state = store.get_render_state(key)
             self.assertEqual(str(state["note_path"]), new_path.as_posix())
 
-    def test_backs_up_stale_generated_note_before_replacing_it(self) -> None:
+    def test_replaces_append_only_generated_note_without_backup(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             old_config, old_path, key = create_old_note(root)
@@ -121,7 +121,47 @@ class RenderStateMigrationTest(unittest.TestCase):
             new_path = PurePosixPath("ai-sessions", *old_path.parts[-3:])
             new_target = config.vault_path / Path(*new_path.parts)
             new_target.parent.mkdir(parents=True)
-            stale = current.replace("Move this note.", "Old title", 1)
+            stale = current.replace(
+                'title: "Move this note."',
+                'title: "Old title"',
+                1,
+            ).replace("\nMove this note.\n", "\n", 1)
+            new_target.write_text(stale, encoding="utf-8")
+
+            planned, errors = migrate_render_state(config)
+            self.assertEqual(errors, [])
+            self.assertEqual(
+                [item.operation for item in planned],
+                ["replace-append-only"],
+            )
+            self.assertIsNone(planned[0].backup_path)
+
+            migrations, errors = migrate_render_state(config, apply=True)
+            self.assertEqual(errors, [])
+            self.assertEqual(migrations, planned)
+            self.assertFalse(old_target.exists())
+            self.assertEqual(new_target.read_text(encoding="utf-8"), current)
+            self.assertEqual(list(new_target.parent.glob("*.stale-*.md")), [])
+            with EventStore(config.state_dir) as store:
+                state = store.get_render_state(key)
+            self.assertEqual(str(state["note_path"]), new_path.as_posix())
+            self.assertEqual(sync_vault(config), (0, 1))
+
+    def test_backs_up_modified_generated_note_before_replacing_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old_config, old_path, key = create_old_note(root)
+            config = replace(old_config, destination="ai-sessions")
+            old_target = config.vault_path / Path(*old_path.parts)
+            current = old_target.read_text(encoding="utf-8")
+            new_path = PurePosixPath("ai-sessions", *old_path.parts[-3:])
+            new_target = config.vault_path / Path(*new_path.parts)
+            new_target.parent.mkdir(parents=True)
+            stale = current.replace(
+                "\nMove this note.\n",
+                "\nEdited locally.\n",
+                1,
+            )
             new_target.write_text(stale, encoding="utf-8")
 
             planned, errors = migrate_render_state(config)
@@ -185,7 +225,11 @@ class RenderStateMigrationTest(unittest.TestCase):
             new_path = PurePosixPath("ai-sessions", *old_path.parts[-3:])
             new_target = config.vault_path / Path(*new_path.parts)
             new_target.parent.mkdir(parents=True)
-            stale = current.replace("Move this note.", "Old title", 1)
+            stale = current.replace(
+                "\nMove this note.\n",
+                "\nEdited locally.\n",
+                1,
+            )
             new_target.write_text(stale, encoding="utf-8")
             real_replace = os.replace
 
@@ -238,7 +282,11 @@ class RenderStateMigrationTest(unittest.TestCase):
             new_path = PurePosixPath("ai-sessions", *old_path.parts[-3:])
             new_target = config.vault_path / Path(*new_path.parts)
             new_target.parent.mkdir(parents=True)
-            stale = current.replace("Move this note.", "Old title", 1)
+            stale = current.replace(
+                "\nMove this note.\n",
+                "\nEdited locally.\n",
+                1,
+            )
             new_target.write_text(stale, encoding="utf-8")
             planned, errors = migrate_render_state(config)
             self.assertEqual(errors, [])
