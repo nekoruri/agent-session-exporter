@@ -11,6 +11,15 @@ fingerprintによる重複排除、credentialのredact、Vault外への書き込
 すべてのPRで維持する。会話本文を得られない環境から非公開データを取得する処理は
 追加しない。
 
+| 項目 | Pull request |
+|---|---|
+| ingest判定用メタデータ | [#5](https://github.com/nekoruri/agent-session-exporter/pull/5) |
+| 実ユーザープロンプトのタイトル | [#6](https://github.com/nekoruri/agent-session-exporter/pull/6) |
+| イベント名とworkspace情報の正規化 | [#7](https://github.com/nekoruri/agent-session-exporter/pull/7) |
+| destination変更後のrender state修復 | [#8](https://github.com/nekoruri/agent-session-exporter/pull/8) |
+| パス生成用timezone | [#9](https://github.com/nekoruri/agent-session-exporter/pull/9) |
+| 更新・描画・アーカイブ時刻 | [#10](https://github.com/nekoruri/agent-session-exporter/pull/10) |
+
 ## PR 1: ingestが本文の有無と更新を判定できるようにする
 
 Markdownのfrontmatterへ次の項目を追加する。
