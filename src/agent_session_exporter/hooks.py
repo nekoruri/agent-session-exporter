@@ -6,6 +6,7 @@ import json
 import os
 import shlex
 import tempfile
+import urllib.parse
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -64,16 +65,36 @@ def claude_hooks(executable: str = "ase") -> str:
     return json.dumps({"hooks": hooks}, ensure_ascii=False, indent=2)
 
 
-def claude_cloud_hooks(collector_url: str) -> str:
-    """Return Claude cloud-compatible HTTP hook settings."""
-    base = collector_url.rstrip("/")
+def claude_cloud_hooks(inbox_url: str) -> str:
+    """Return Claude Cloud command-hook settings for the Worker inbox."""
+    base = inbox_url.rstrip("/")
+    parsed = urllib.parse.urlsplit(base)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("Claude Cloud inbox URL must be an HTTPS origin.")
+    endpoint = shlex.quote(f"{base}/v1/hooks/claude-cloud")
+    command = (
+        'test "${CLAUDE_CODE_REMOTE:-}" = "true" || exit 0; '
+        'test -n "${AGENT_SESSION_EXPORTER_INGEST_TOKEN:-}" || { '
+        'echo "AGENT_SESSION_EXPORTER_INGEST_TOKEN is not set" >&2; exit 1; }; '
+        "exec curl --fail --silent --show-error --output /dev/null "
+        "--max-time 10 --header 'Content-Type: application/json' "
+        '--header "Authorization: Bearer '
+        '${AGENT_SESSION_EXPORTER_INGEST_TOKEN}" '
+        "--header 'X-Claude-Code-Remote: true' --data-binary @- "
+        f"{endpoint}"
+    )
     hook = {
-        "type": "http",
-        "url": f"{base}/v1/hooks/claude-cloud",
-        "headers": {
-            "Authorization": "Bearer $AGENT_SESSION_EXPORTER_TOKEN",
-        },
-        "allowedEnvVars": ["AGENT_SESSION_EXPORTER_TOKEN"],
+        "type": "command",
+        "command": command,
+        "timeout": 15,
     }
     events = [
         "UserPromptSubmit",

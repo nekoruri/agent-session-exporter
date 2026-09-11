@@ -10,9 +10,13 @@ from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 
 from . import __version__
+from .claude_cloud import pull_events
+from .codex_cloud import (
+    exec_codex_cloud,
+    sync_codex_cloud,
+)
 from .core import (
     DEFAULT_DESTINATION,
-    Config,
     EventStore,
     default_config_path,
     load_config,
@@ -27,19 +31,12 @@ from .hooks import (
     install_local_hooks,
 )
 from .importers import import_export
-from .remote import (
-    exec_codex_cloud,
-    pull_events,
-    push_event,
-    sync_codex_cloud,
-)
 from .renderer import (
     migrate_render_state,
     render_state_path_issues,
     sync_session,
     sync_vault,
 )
-from .server import serve
 
 
 def _config_path(value: str | None) -> Path:
@@ -87,11 +84,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="read one hook JSON object from stdin",
     )
     capture.add_argument("--source", required=True)
-    capture.add_argument(
-        "--strict-remote",
-        action="store_true",
-        help="fail when the configured remote collector is unavailable",
-    )
     capture.add_argument("--verbose", action="store_true")
 
     subparsers.add_parser("sync", help="render changed sessions to the Vault")
@@ -106,18 +98,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="apply the displayed plan (default: dry-run)",
     )
 
-    server = subparsers.add_parser("serve", help="run the HTTP collector")
-    server.add_argument(
-        "--listen",
-        help="override server.listen from the configuration",
+    pull = subparsers.add_parser(
+        "pull",
+        help="pull Claude Cloud events from the Worker inbox",
     )
-    server.add_argument(
-        "--port",
-        type=int,
-        help="override server.port from the configuration",
-    )
-
-    pull = subparsers.add_parser("pull", help="pull events from the collector")
     pull.add_argument("--limit", type=int, default=500)
     pull.add_argument("--sync", action="store_true")
 
@@ -164,8 +148,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="command name or absolute executable path for command hooks",
     )
     hooks.add_argument(
+        "--inbox-url",
         "--collector-url",
-        default="http://127.0.0.1:8765",
+        dest="inbox_url",
+        default="",
+        help="public HTTPS URL of the Claude Cloud Worker inbox",
     )
 
     install_hooks = subparsers.add_parser(
@@ -225,16 +212,6 @@ def _capture(args: argparse.Namespace, config_path: Path) -> int:
     envelope = normalize_event(payload, args.source, config)
     with EventStore(config.state_dir) as store:
         event_id, inserted = store.add_event(envelope)
-    remote_error = ""
-    try:
-        pushed = push_event(config, envelope)
-    except RuntimeError as error:
-        pushed = False
-        remote_error = str(error)
-    if remote_error:
-        if args.strict_remote:
-            raise RuntimeError(remote_error)
-        print(f"warning: {remote_error}", file=sys.stderr)
     if config.sync_on_capture and config.vault_path is not None:
         try:
             sync_session(
@@ -247,8 +224,7 @@ def _capture(args: argparse.Namespace, config_path: Path) -> int:
             print(f"warning: Vault sync failed: {error}", file=sys.stderr)
     if args.verbose:
         print(
-            f"event={event_id} inserted={str(inserted).lower()} "
-            f"remote={str(pushed).lower()}",
+            f"event={event_id} inserted={str(inserted).lower()}",
             file=sys.stderr,
         )
     return 0
@@ -294,13 +270,13 @@ def _doctor(config_path: Path) -> int:
             shutil.which("codex") or "not found (only needed for Codex Cloud)",
         )
     )
-    if config.collector.url:
-        token = os.environ.get(config.collector.token_env, "")
+    if config.claude_cloud.url:
+        token = os.environ.get(config.claude_cloud.token_env, "")
         checks.append(
             (
-                "collector token",
+                "Claude Cloud pull token",
                 bool(token),
-                config.collector.token_env,
+                config.claude_cloud.token_env,
             )
         )
     for label, passed, detail in checks:
@@ -309,19 +285,6 @@ def _doctor(config_path: Path) -> int:
         if not passed and label not in {"codex CLI"}:
             failures += 1
     return 1 if failures else 0
-
-
-def _override_server(config: Config, args: argparse.Namespace) -> Config:
-    if args.listen is None and args.port is None:
-        return config
-    from dataclasses import replace
-
-    server_config = replace(
-        config.server,
-        listen=args.listen or config.server.listen,
-        port=args.port or config.server.port,
-    )
-    return replace(config, server=server_config)
 
 
 def run(arguments: Sequence[str] | None = None) -> int:
@@ -338,7 +301,9 @@ def run(arguments: Sequence[str] | None = None) -> int:
         elif args.source == "claude":
             print(claude_hooks(args.executable))
         else:
-            print(claude_cloud_hooks(args.collector_url))
+            if not args.inbox_url:
+                raise ValueError("--inbox-url is required for claude-cloud hooks.")
+            print(claude_cloud_hooks(args.inbox_url))
         return 0
     if args.command == "install-hooks":
         target, added = install_local_hooks(
@@ -380,9 +345,6 @@ def run(arguments: Sequence[str] | None = None) -> int:
             f"{len(migrations) if args.apply else 0} errors={len(errors)}"
         )
         return 1 if errors else 0
-    if args.command == "serve":
-        serve(_override_server(config, args))
-        return 0
     if args.command == "pull":
         imported, cursor = pull_events(config, limit=args.limit)
         print(f"imported={imported} cursor={cursor}")

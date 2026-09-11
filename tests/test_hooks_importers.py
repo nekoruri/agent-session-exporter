@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import unittest
 import zipfile
@@ -8,12 +9,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_session_exporter.core import (
-    CollectorConfig,
+    ClaudeCloudConfig,
     Config,
     EventStore,
-    ServerConfig,
 )
-from agent_session_exporter.hooks import install_local_hooks
+from agent_session_exporter.hooks import claude_cloud_hooks, install_local_hooks
 from agent_session_exporter.importers import import_export
 from agent_session_exporter.renderer import sync_vault
 
@@ -28,12 +28,81 @@ def config_for(root: Path) -> Config:
         include_tool_details=False,
         sync_on_capture=True,
         project_aliases={},
-        collector=CollectorConfig(),
-        server=ServerConfig(),
+        claude_cloud=ClaudeCloudConfig(),
     )
 
 
 class HooksImportersTest(unittest.TestCase):
+    def test_claude_cloud_hooks_use_remote_only_curl_forwarding(self) -> None:
+        settings = json.loads(claude_cloud_hooks("https://inbox.example/"))
+        hooks = settings["hooks"]
+        self.assertEqual(
+            set(hooks),
+            {
+                "UserPromptSubmit",
+                "MessageDisplay",
+                "Stop",
+                "StopFailure",
+                "SessionEnd",
+            },
+        )
+        handler = hooks["UserPromptSubmit"][0]["hooks"][0]
+        self.assertEqual(handler["type"], "command")
+        self.assertEqual(handler["timeout"], 15)
+        self.assertNotIn("url", handler)
+        self.assertNotIn("headers", handler)
+        command = handler["command"]
+        self.assertIn(
+            'test "${CLAUDE_CODE_REMOTE:-}" = "true" || exit 0',
+            command,
+        )
+        self.assertIn("AGENT_SESSION_EXPORTER_INGEST_TOKEN", command)
+        self.assertIn("curl --fail --silent --show-error", command)
+        self.assertIn("--data-binary @-", command)
+        self.assertIn(
+            "https://inbox.example/v1/hooks/claude-cloud",
+            command,
+        )
+
+        local = subprocess.run(
+            command,
+            shell=True,
+            input="{}",
+            capture_output=True,
+            text=True,
+            env={"CLAUDE_CODE_REMOTE": "false", "PATH": ""},
+            check=False,
+        )
+        self.assertEqual(local.returncode, 0)
+
+        missing_token = subprocess.run(
+            command,
+            shell=True,
+            input="{}",
+            capture_output=True,
+            text=True,
+            env={"CLAUDE_CODE_REMOTE": "true", "PATH": ""},
+            check=False,
+        )
+        self.assertEqual(missing_token.returncode, 1)
+        self.assertIn("INGEST_TOKEN is not set", missing_token.stderr)
+
+    def test_claude_cloud_hooks_require_https(self) -> None:
+        for value in (
+            "http://inbox.example",
+            "https://",
+            "https://inbox.example/path",
+            "https://token@inbox.example",
+        ):
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "HTTPS origin",
+                ),
+            ):
+                claude_cloud_hooks(value)
+
     def test_hook_install_is_additive_and_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "settings.json"

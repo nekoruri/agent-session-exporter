@@ -68,21 +68,12 @@ def default_state_dir() -> Path:
 
 
 @dataclass(frozen=True)
-class CollectorConfig:
-    """Remote collector configuration."""
+class ClaudeCloudConfig:
+    """Claude Cloud Worker inbox configuration."""
 
     url: str = ""
-    token_env: str = "AGENT_SESSION_EXPORTER_TOKEN"
+    token_env: str = "AGENT_SESSION_EXPORTER_PULL_TOKEN"
     timeout_seconds: float = 3.0
-
-
-@dataclass(frozen=True)
-class ServerConfig:
-    """Local HTTP collector configuration."""
-
-    listen: str = "127.0.0.1"
-    port: int = 8765
-    token_env: str = "AGENT_SESSION_EXPORTER_TOKEN"
 
 
 @dataclass(frozen=True)
@@ -97,8 +88,7 @@ class Config:
     include_tool_details: bool
     sync_on_capture: bool
     project_aliases: dict[str, str]
-    collector: CollectorConfig
-    server: ServerConfig
+    claude_cloud: ClaudeCloudConfig
     path_timezone: str = "UTC"
 
 
@@ -197,8 +187,7 @@ def load_config(path: Path | None = None) -> Config:
         with config_path.open("rb") as stream:
             raw = tomllib.load(stream)
 
-    collector_raw = raw.get("collector") or {}
-    server_raw = raw.get("server") or {}
+    claude_cloud_raw = raw.get("claude_cloud") or raw.get("collector") or {}
     aliases = raw.get("project_aliases") or {}
     state_value = raw.get("state_dir")
 
@@ -215,18 +204,14 @@ def load_config(path: Path | None = None) -> Config:
         include_tool_details=bool(raw.get("include_tool_details", False)),
         sync_on_capture=bool(raw.get("sync_on_capture", True)),
         project_aliases={str(key): str(value) for key, value in aliases.items()},
-        collector=CollectorConfig(
-            url=str(collector_raw.get("url") or "").rstrip("/"),
+        claude_cloud=ClaudeCloudConfig(
+            url=str(claude_cloud_raw.get("url") or "").rstrip("/"),
             token_env=str(
-                collector_raw.get("token_env") or "AGENT_SESSION_EXPORTER_TOKEN"
+                claude_cloud_raw.get("token_env")
+                or "AGENT_SESSION_EXPORTER_PULL_TOKEN"
             ),
-            timeout_seconds=float(collector_raw.get("timeout_seconds") or 3.0),
-        ),
-        server=ServerConfig(
-            listen=str(server_raw.get("listen") or "127.0.0.1"),
-            port=int(server_raw.get("port") or 8765),
-            token_env=str(
-                server_raw.get("token_env") or "AGENT_SESSION_EXPORTER_TOKEN"
+            timeout_seconds=float(
+                claude_cloud_raw.get("timeout_seconds") or 3.0
             ),
         ),
         path_timezone=_path_timezone(raw.get("path_timezone")),
@@ -251,15 +236,10 @@ def render_initial_config(
         "include_tool_details = false\n"
         "sync_on_capture = true\n"
         "\n"
-        "[collector]\n"
+        "[claude_cloud]\n"
         'url = ""\n'
-        'token_env = "AGENT_SESSION_EXPORTER_TOKEN"\n'
+        'token_env = "AGENT_SESSION_EXPORTER_PULL_TOKEN"\n'
         "timeout_seconds = 3.0\n"
-        "\n"
-        "[server]\n"
-        'listen = "127.0.0.1"\n'
-        "port = 8765\n"
-        'token_env = "AGENT_SESSION_EXPORTER_TOKEN"\n'
         "\n"
         "[project_aliases]\n"
         '# "github.com/example/repository" = "repository"\n'

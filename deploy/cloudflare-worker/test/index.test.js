@@ -1,0 +1,204 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import worker, { MAX_BODY_BYTES } from "../src/index.js";
+
+class FakeStatement {
+  constructor(database, sql) {
+    this.database = database;
+    this.sql = sql;
+    this.values = [];
+  }
+
+  bind(...values) {
+    this.values = values;
+    return this;
+  }
+
+  async run() {
+    assert.match(this.sql, /INSERT OR IGNORE INTO events/);
+    const [
+      fingerprint,
+      source,
+      deviceId,
+      sessionId,
+      eventName,
+      occurredAt,
+      cwd,
+      project,
+      repository,
+      branch,
+      transcriptPath,
+      payloadJson,
+      receivedAt,
+    ] = this.values;
+    if (this.database.rows.some((row) => row.fingerprint === fingerprint)) {
+      return { meta: { changes: 0 } };
+    }
+    this.database.rows.push({
+      id: this.database.nextId,
+      fingerprint,
+      source,
+      device_id: deviceId,
+      session_id: sessionId,
+      event_name: eventName,
+      occurred_at: occurredAt,
+      cwd,
+      project,
+      repository,
+      branch,
+      transcript_path: transcriptPath,
+      payload_json: payloadJson,
+      received_at: receivedAt,
+    });
+    this.database.nextId += 1;
+    return { meta: { changes: 1 } };
+  }
+
+  async all() {
+    assert.match(this.sql, /FROM events WHERE id > \?/);
+    const [after, limit] = this.values;
+    return {
+      results: this.database.rows
+        .filter((row) => row.id > after)
+        .slice(0, limit),
+    };
+  }
+}
+
+class FakeD1 {
+  constructor() {
+    this.rows = [];
+    this.nextId = 1;
+  }
+
+  prepare(sql) {
+    return new FakeStatement(this, sql);
+  }
+}
+
+function environment(overrides = {}) {
+  return {
+    DB: new FakeD1(),
+    DEVICE_ID: "claude-cloud",
+    INGEST_TOKEN: "ingest-secret",
+    PULL_TOKEN: "pull-secret",
+    ...overrides,
+  };
+}
+
+function hookRequest(payload, token = "ingest-secret", remote = "true") {
+  return new Request("https://inbox.example/v1/hooks/claude-cloud", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      "X-Claude-Code-Remote": remote,
+    },
+    body: JSON.stringify(payload),
+  });
+}
+
+function sampleEvent(overrides = {}) {
+  return {
+    session_id: "session-1",
+    hook_event_name: "userpromptsubmit",
+    timestamp: "2026-08-01T00:00:00.000Z",
+    cwd: "/workspace/example",
+    prompt: "Hello",
+    ...overrides,
+  };
+}
+
+test("health reports whether bindings and secrets are configured", async () => {
+  const healthy = await worker.fetch(
+    new Request("https://inbox.example/health"),
+    environment(),
+  );
+  assert.equal(healthy.status, 200);
+  assert.deepEqual(await healthy.json(), { status: "ok" });
+
+  const unconfigured = await worker.fetch(
+    new Request("https://inbox.example/health"),
+    environment({ PULL_TOKEN: "" }),
+  );
+  assert.equal(unconfigured.status, 503);
+});
+
+test("local Claude hooks are ignored before authentication", async () => {
+  const env = environment();
+  const response = await worker.fetch(hookRequest(sampleEvent(), "", "false"), env);
+  assert.equal(response.status, 204);
+  assert.equal(env.DB.rows.length, 0);
+});
+
+test("ingest and pull tokens cannot be used interchangeably", async () => {
+  const env = environment();
+  const ingestWithPullToken = await worker.fetch(
+    hookRequest(sampleEvent(), "pull-secret"),
+    env,
+  );
+  assert.equal(ingestWithPullToken.status, 401);
+
+  const pullWithIngestToken = await worker.fetch(
+    new Request("https://inbox.example/v1/events", {
+      headers: { Authorization: "Bearer ingest-secret" },
+    }),
+    env,
+  );
+  assert.equal(pullWithIngestToken.status, 401);
+});
+
+test("valid events are normalized, redacted, deduplicated, and pulled", async () => {
+  const env = environment();
+  const payload = sampleEvent({
+    api_key: "secret-value",
+    transcript_path: "/workspace/private.jsonl",
+    note: "Bearer abcdefghijklmnop",
+  });
+  const first = await worker.fetch(hookRequest(payload), env);
+  const duplicate = await worker.fetch(hookRequest(payload), env);
+  assert.equal(first.status, 202);
+  assert.equal(duplicate.status, 202);
+  assert.equal(env.DB.rows.length, 1);
+
+  const pull = await worker.fetch(
+    new Request("https://inbox.example/v1/events?after=0&limit=10", {
+      headers: { Authorization: "Bearer pull-secret" },
+    }),
+    env,
+  );
+  assert.equal(pull.status, 200);
+  const result = await pull.json();
+  assert.equal(result.next_after, 1);
+  assert.equal(result.events.length, 1);
+  assert.equal(result.events[0].event_name, "UserPromptSubmit");
+  assert.equal(result.events[0].project, "example");
+  assert.equal(result.events[0].transcript_path, "");
+  assert.equal(result.events[0].payload.api_key, "[REDACTED]");
+  assert.equal(result.events[0].payload.note, "[REDACTED]");
+  assert.equal("transcript_path" in result.events[0].payload, false);
+  assert.match(result.events[0].fingerprint, /^[a-f0-9]{64}$/);
+});
+
+test("unsupported events and oversized bodies are rejected", async () => {
+  const env = environment();
+  const unsupported = await worker.fetch(
+    hookRequest(sampleEvent({ hook_event_name: "PreToolUse" })),
+    env,
+  );
+  assert.equal(unsupported.status, 400);
+
+  const oversized = new Request("https://inbox.example/v1/hooks/claude-cloud", {
+    method: "POST",
+    headers: {
+      Authorization: "Bearer ingest-secret",
+      "Content-Type": "application/json",
+      "Content-Length": String(MAX_BODY_BYTES + 1),
+      "X-Claude-Code-Remote": "true",
+    },
+    body: "{}",
+  });
+  const response = await worker.fetch(oversized, env);
+  assert.equal(response.status, 413);
+});

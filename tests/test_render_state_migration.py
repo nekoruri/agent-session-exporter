@@ -11,10 +11,9 @@ from unittest.mock import patch
 
 from agent_session_exporter import renderer as renderer_module
 from agent_session_exporter.core import (
-    CollectorConfig,
+    ClaudeCloudConfig,
     Config,
     EventStore,
-    ServerConfig,
     normalize_event,
 )
 from agent_session_exporter.renderer import (
@@ -34,8 +33,7 @@ def config_for(root: Path, destination: str) -> Config:
         include_tool_details=False,
         sync_on_capture=True,
         project_aliases={},
-        collector=CollectorConfig(),
-        server=ServerConfig(),
+        claude_cloud=ClaudeCloudConfig(),
     )
 
 

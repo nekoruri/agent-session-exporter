@@ -6,15 +6,10 @@ redact = true
 include_tool_details = false
 sync_on_capture = true
 
-[collector]
+[claude_cloud]
 url = ""
-token_env = "AGENT_SESSION_EXPORTER_TOKEN"
+token_env = "AGENT_SESSION_EXPORTER_PULL_TOKEN"
 timeout_seconds = 3.0
-
-[server]
-listen = "127.0.0.1"
-port = 8765
-token_env = "AGENT_SESSION_EXPORTER_TOKEN"
 
 [project_aliases]
 # "git@github.com:example/repository.git" = "repository"

@@ -17,10 +17,9 @@ from agent_session_exporter.adapters import (
 from agent_session_exporter.cli import run
 from agent_session_exporter.core import (
     DEFAULT_DESTINATION,
-    CollectorConfig,
+    ClaudeCloudConfig,
     Config,
     EventStore,
-    ServerConfig,
     detect_local_timezone,
     load_config,
     normalize_event,
@@ -39,8 +38,7 @@ def config_for(root: Path) -> Config:
         include_tool_details=False,
         sync_on_capture=True,
         project_aliases={},
-        collector=CollectorConfig(),
-        server=ServerConfig(),
+        claude_cloud=ClaudeCloudConfig(),
     )
 
 
@@ -298,6 +296,34 @@ class CoreRendererTest(unittest.TestCase):
 
         self.assertEqual(config.path_timezone, "America/New_York")
         detect.assert_called_once_with()
+
+    def test_loads_claude_cloud_config_and_legacy_collector_name(self) -> None:
+        for section in ("claude_cloud", "collector"):
+            with (
+                self.subTest(section=section),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                config_path = Path(directory) / "config.toml"
+                config_path.write_text(
+                    (
+                        f"[{section}]\n"
+                        'url = "https://inbox.example/"\n'
+                        'token_env = "CUSTOM_PULL_TOKEN"\n'
+                        "timeout_seconds = 7.0\n"
+                    ),
+                    encoding="utf-8",
+                )
+                config = load_config(config_path)
+
+            self.assertEqual(config.claude_cloud.url, "https://inbox.example")
+            self.assertEqual(config.claude_cloud.token_env, "CUSTOM_PULL_TOKEN")
+            self.assertEqual(config.claude_cloud.timeout_seconds, 7.0)
+
+    def test_initial_config_uses_claude_cloud_pull_token(self) -> None:
+        content = render_initial_config(Path("/tmp/vault"), "archive", "UTC")
+        self.assertIn("[claude_cloud]", content)
+        self.assertIn("AGENT_SESSION_EXPORTER_PULL_TOKEN", content)
+        self.assertNotIn("[collector]", content)
 
     def test_detect_local_timezone_skips_invalid_hints_and_falls_back(self) -> None:
         with patch(
