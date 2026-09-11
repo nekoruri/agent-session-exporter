@@ -7,6 +7,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
+from uuid import UUID
 
 from agent_session_exporter.claude_cloud import _remote_envelope
 from agent_session_exporter.cli import main
@@ -34,6 +35,73 @@ def note_content(config: Config) -> str:
 
 
 class RedactionTest(unittest.TestCase):
+    def test_missing_session_id_deduplicates_after_redaction(self) -> None:
+        for enabled in (True, False):
+            with self.subTest(redact=enabled), tempfile.TemporaryDirectory() as directory:
+                config = config_for(Path(directory), redact=enabled)
+                events = [normalize_event({
+                    "hook_event_name": "Stop", "timestamp": "2026-09-12T00:00:00Z",
+                    "password": secret,
+                }, "claude-code", config, inspect_cwd=False)
+                    for secret in ("synthetic-one", "synthetic-two")]
+                self.assertEqual(events[0]["session_id"] == events[1]["session_id"], enabled)
+                self.assertEqual(events[0]["fingerprint"] == events[1]["fingerprint"], enabled)
+                with EventStore(config.state_dir) as store:
+                    for event in events:
+                        store.add_event(event)
+                    self.assertEqual(len(store.list_events()), 1 if enabled else 2)
+
+    def test_exec_without_task_id_keeps_each_submission_independent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = config_for(Path(directory))
+            ids = [UUID(int=1), UUID(int=2)]
+            with (
+                patch("agent_session_exporter.codex_cloud.now_iso", return_value="2026-09-12T00:00:00Z"),
+                patch("agent_session_exporter.codex_cloud.uuid4", side_effect=ids),
+                patch("agent_session_exporter.codex_cloud._run_codex_cloud", return_value=OPENAI),
+            ):
+                for _ in ids:
+                    self.assertEqual(exec_codex_cloud(config, GITHUB, environment="test"), REDACTED)
+            with EventStore(config.state_dir) as store:
+                events = store.list_events()
+                self.assertEqual([event.session_id for event in events], [value.hex for value in ids])
+                for event in events:
+                    self.assertEqual(event.payload["task_id"], event.session_id)
+                    self.assertEqual(event.payload["prompt"], REDACTED)
+                    self.assertEqual(event.payload["output"], REDACTED)
+
+    def test_detected_identifiers_preserve_sessions_devices_and_rendering(self) -> None:
+        opaque = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+        for enabled in (True, False):
+            with self.subTest(redact=enabled), tempfile.TemporaryDirectory() as directory:
+                config = config_for(Path(directory), redact=enabled)
+                with EventStore(config.state_dir) as store:
+                    for device in (opaque, opaque[::-1]):
+                        for session in (opaque, opaque[::-1]):
+                            event = normalize_event({
+                                "session_id": session, "hook_event_name": "UserPromptSubmit",
+                                "prompt": "Hello", "timestamp": "2026-09-12T00:00:00Z",
+                            }, "claude-code", config, device_id=device, inspect_cwd=False)
+                            self.assertEqual(event["payload"]["session_id"], event["session_id"])
+                            if enabled:
+                                self.assertNotIn(opaque, json.dumps(event))
+                                self.assertNotIn(opaque[::-1], json.dumps(event))
+                                self.assertEqual(redact_value(event), event)
+                            for _ in range(2):
+                                store.add_event(event)
+                    self.assertEqual(len(store.list_session_keys()), 4)
+                    self.assertEqual(len(store.list_events()), 4)
+                self.assertEqual(sync_vault(config), (4, 0))
+                self.assertEqual(len(list(config.vault_path.rglob("*.md"))), 4)
+                self.assertEqual(sync_vault(config), (0, 4))
+                if enabled:
+                    self.assertNotIn(opaque, note_content(config))
+                    self.assertNotIn(opaque[::-1], note_content(config))
+        # All accepted aliases use the same pseudonym as the envelope's canonical key.
+        aliases = {key: GITHUB for key in ("id", "sessionId", "task_id", "taskId", "deviceId")}
+        pseudonym = redact_value(GITHUB, "session_id")
+        self.assertEqual(set(redact_value(aliases).values()), {pseudonym})
+
     def test_full_tokens_and_all_assignments_are_masked_offline(self) -> None:
         text = f'{GITHUB} {OPENAI}\npassword = "one123"; password = "two456"'
         with (

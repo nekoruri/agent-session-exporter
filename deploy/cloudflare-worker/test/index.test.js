@@ -167,6 +167,53 @@ test("ordinary text and JSON types survive masking, which is idempotent", async 
   assert.deepEqual(await redactValue(masked), masked);
 });
 
+test("batched scanning preserves field boundaries, Unicode, multiline keys and large payloads", async () => {
+  const github = "ghp_" + "a".repeat(36);
+  const openai = "sk-" + "a".repeat(20) + "T3BlbkFJ" + "b".repeat(20);
+  const pem = "-----BEGIN PRIVATE KEY-----\nMI" + "A".repeat(128) + "\n-----END PRIVATE KEY-----";
+  const input = {
+    fields: ["", "🙂 日本語\n" + github, openai, pem, "ordinary\ntext", ""],
+    splitPem: ["before", ...pem.split("\n"), "after"],
+    password: { ignored: github },
+    entries: Array(10000).fill("ordinary text"),
+    tail: `${github} and ${openai}`,
+  };
+  const output = await redactValue(input);
+  assert.deepEqual(output.fields, ["", "🙂 日本語\n[REDACTED]", "[REDACTED]", "[REDACTED]", "ordinary\ntext", ""]);
+  assert.equal(output.password, "[REDACTED]");
+  assert.deepEqual(output.splitPem, ["before", "[REDACTED]", "[REDACTED]", "[REDACTED]", "after"]);
+  assert.deepEqual(output.entries, input.entries);
+  assert.equal(output.tail, "[REDACTED] and [REDACTED]");
+  assert.deepEqual(await redactValue(output), output);
+  assert.equal(input.fields[1], "🙂 日本語\n" + github);
+  assert.deepEqual(await redactValue([null, false, 42, { password: "short" }]),
+    [null, false, 42, { password: "[REDACTED]" }]);
+});
+
+test("detected session identifiers remain distinct and stable in D1", async () => {
+  const env = environment();
+  const pseudonyms = new Set();
+  for (const letter of ["a", "b"]) {
+    const id = "ghp_" + letter.repeat(36);
+    const payload = sampleEvent({ session_id: id });
+    for (let repeat = 0; repeat < 2; repeat++) {
+      assert.equal((await worker.fetch(hookRequest(payload), env)).status, 202);
+    }
+    const masked = await redactValue({ sessionId: id, task_id: id, deviceId: id });
+    assert.equal(masked.sessionId, masked.task_id);
+    assert.equal(masked.sessionId, masked.deviceId);
+    assert.deepEqual(await redactValue(masked), masked);
+    pseudonyms.add(masked.sessionId);
+    assert.equal(JSON.stringify(env.DB.rows).includes(id), false);
+  }
+  assert.equal(env.DB.rows.length, 2);
+  assert.equal(pseudonyms.size, 2);
+  for (const row of env.DB.rows) {
+    assert.ok(pseudonyms.has(row.session_id));
+    assert.equal(JSON.parse(row.payload_json).session_id, row.session_id);
+  }
+});
+
 test("health reports whether bindings and secrets are configured", async () => {
   const healthy = await worker.fetch(
     new Request("https://inbox.example/health"),

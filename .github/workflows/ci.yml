@@ -44,4 +44,6 @@ jobs:
         with:
           node-version: "22"
       - run: npm ci --ignore-scripts
-      - run: npm test
+      - run: npm run check
+        env:
+          WRANGLER_SEND_METRICS: "false"

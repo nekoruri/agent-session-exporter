@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from functools import lru_cache
@@ -18,6 +19,7 @@ from detect_secrets.plugins.private_key import PrivateKeyDetector
 from detect_secrets.settings import default_settings, get_plugins
 
 REDACTED = "[REDACTED]"
+IDENTITY_KEYS = {"id", "session_id", "sessionId", "task_id", "taskId", "device_id", "deviceId"}
 # Field names and protocol syntax are application policy, not provider token formats.
 SECRET_KEY_RE = re.compile(
     r"(?:^|[_-])(?:api[_-]?key|access[_-]?token|client[_-]?secret|"
@@ -110,7 +112,11 @@ def redact_value(value: Any, key: str = "") -> Any:
     if key and _secret_key(key):
         return REDACTED
     if isinstance(value, str):
-        return redact_text(value)
+        masked = redact_text(value)
+        if key in IDENTITY_KEYS and masked != value:
+            # A shared marker would merge unrelated sessions/devices during storage or rendering.
+            return "redacted-" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+        return masked
     if isinstance(value, list):
         return [redact_value(item) for item in value]
     if isinstance(value, dict):

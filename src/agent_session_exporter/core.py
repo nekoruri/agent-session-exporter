@@ -352,7 +352,8 @@ def normalize_event(
         ["session_id", "sessionId", "task_id", "taskId", "id"],
     )
     if not session_id:
-        session_id = event_fingerprint(cleaned_payload)[:24]
+        identity_payload = redact_value(cleaned_payload) if config.redact else cleaned_payload
+        session_id = event_fingerprint(identity_payload)[:24]
 
     raw_event_name = (
         _first_string(

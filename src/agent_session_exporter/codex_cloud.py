@@ -7,8 +7,9 @@ import re
 import subprocess
 from collections.abc import Mapping
 from typing import Any
+from uuid import uuid4
 
-from .core import Config, EventStore, event_fingerprint, finalize_event, now_iso
+from .core import Config, EventStore, finalize_event, now_iso
 from .redaction import redact_text
 
 
@@ -146,10 +147,8 @@ def exec_codex_cloud(
             if match:
                 task_id = match.group(1).rstrip(".,:()[]")
                 break
-    task_id = (
-        task_id
-        or event_fingerprint({"query": query, "output": output, "time": now_iso()})[:24]
-    )
+    # Each exec starts a new task, even with identical input in the same second.
+    task_id = task_id or uuid4().hex
     payload = {
         "task_id": task_id,
         "prompt": query,

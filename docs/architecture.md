@@ -13,6 +13,9 @@ Vaultへは直接同期しない。取得・正規化・描画を分離し、別
    `finalize_event`は全取込経路でメタデータ付与後に資格情報をマスクし、
    保存する値からfingerprintを計算する。検出ルールはPythonではdetect-secrets、
    WorkerではSecretlintを使用し、ベンダーごとのパターンは自前で保守しない。
+   session IDがない入力では、マスク後のpayloadから仮IDを生成する。
+   Codex Cloudの`exec`でtask IDが返らない場合は、実行ごとにUUIDを生成する。
+   検出対象のIDはSHA-256由来の仮名に置き換え、保存・描画時の識別を保つ。
 4. SQLiteへappend-onlyで保存する。同じfingerprintのイベントは追加しない。
 5. adapterがtranscriptまたはhook payloadからuser/assistant messageを復元する。
    rendererは復元・結合後の本文、タイトル、diff、メタデータを再度マスクする。

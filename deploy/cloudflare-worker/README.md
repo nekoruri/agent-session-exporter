@@ -8,6 +8,8 @@ Vaultやローカル端末をインターネットへ公開する必要はあり
 資格情報を外部へ送って検証する処理はありません。ルール更新はnpm依存を更新して
 テストし、`npm run check`でWorkerのビルドを確認します。`nodejs_compat`は
 Secretlintが使うNode.js APIのために必要です。
+検査はpayload内の文字列をまとめて1回実行し、検出位置から各フィールドへマスクを
+戻します。CIでも`npm run check`を実行し、deployのdry-runまで確認します。
 
 ## Deploy
 
