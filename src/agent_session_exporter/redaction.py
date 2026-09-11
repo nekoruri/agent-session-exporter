@@ -19,7 +19,7 @@ from detect_secrets.plugins.private_key import PrivateKeyDetector
 from detect_secrets.settings import default_settings, get_plugins
 
 REDACTED = "[REDACTED]"
-IDENTITY_KEYS = {"id", "session_id", "sessionId", "task_id", "taskId", "device_id", "deviceId"}
+IDENTITY_KEYS = {"id", "session_id", "sessionId", "task_id", "taskId", "device_id", "deviceId", "message_id", "messageId"}
 # Field names and protocol syntax are application policy, not provider token formats.
 SECRET_KEY_RE = re.compile(
     r"(?:^|[_-])(?:api[_-]?key|access[_-]?token|client[_-]?secret|"

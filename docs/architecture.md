@@ -17,6 +17,10 @@ Vaultへは直接同期しない。取得・正規化・描画を分離し、別
    Codex Cloudの`exec`でtask IDが返らない場合は、実行ごとにUUIDを生成する。
    検出対象のIDはSHA-256由来の仮名に置き換え、保存・描画時の識別を保つ。
 4. SQLiteへappend-onlyで保存する。同じfingerprintのイベントは追加しない。
+   `MessageDisplay`は`finalize_event`から保存層へメモリ内で引き渡し、payloadを
+   AES-256-GCMで暗号化して`message_chunks`へ保管する。全断片が揃ったら全文を検査し、
+   マスク済みイベントの追加・受信済み記録・暗号文の削除を同じトランザクションで行う。
+   Workerも同じ方針でD1のbatchを使う。詳細は[鍵の管理](message-buffer.md)を参照。
    セッションの列挙・検索では旧IDと仮名IDを同一視し、イベント行とfingerprintは維持する。
    この対応付けはハッシュで行い、検出ライブラリの現在のルールに依存しない。
 5. adapterがtranscriptまたはhook payloadからuser/assistant messageを復元する。
@@ -69,6 +73,8 @@ commitまでは行わない。VaultがGit管理されていても、commit/push�
 - command hookは`CLAUDE_CODE_REMOTE=true`のときだけcurlを実行する。
 - Workerも`X-Claude-Code-Remote: true`のrequestだけを受け付ける。
 - Workerはevent名を固定listで検証し、credentialをredactしてからD1へ保存する。
+- 未完成のMessageDisplayは暗号文としてのみ保管し、通常イベントの取得APIには出さない。
+  鍵はDBから分離する。対象はDB単体の流出で、端末やWorkerの実行環境の侵害は対象外。
 - 検出時の外部APIによる資格情報の検証は行わない。会話内のallowlistコメントを
   検出除外として解釈せず、検出処理が失敗した場合も平文の保存・出力へ戻さない。
 - Workerとローカルの双方でfingerprintを再計算する。

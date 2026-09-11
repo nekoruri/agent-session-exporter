@@ -39,6 +39,7 @@ def config_for(root: Path) -> Config:
         sync_on_capture=True,
         project_aliases={},
         claude_cloud=ClaudeCloudConfig(),
+        buffer_key_path=root / "keys" / "buffer.json",
     )
 
 

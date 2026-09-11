@@ -81,6 +81,7 @@ class Config:
     project_aliases: dict[str, str]
     claude_cloud: ClaudeCloudConfig
     path_timezone: str = "UTC"
+    buffer_key_path: Path | None = None
 
 
 def _expand_optional_path(value: Any) -> Path | None:
@@ -206,6 +207,10 @@ def load_config(path: Path | None = None) -> Config:
             ),
         ),
         path_timezone=_path_timezone(raw.get("path_timezone")),
+        buffer_key_path=(
+            _expand_optional_path(raw.get("buffer_key_path"))
+            or config_path.with_suffix(".buffer-keys.json")
+        ),
     )
 
 
@@ -363,6 +368,8 @@ def normalize_event(
         or "Unknown"
     )
     event_name = canonical_event_name(raw_event_name)
+    if config.redact and event_name == "MessageDisplay" and not _first_string(cleaned_payload, ["session_id", "sessionId"]):
+        raise ValueError("MessageDisplay requires a session_id.")
     for event_key in ("hook_event_name", "event_name", "event", "type"):
         if str(cleaned_payload.get(event_key) or "").strip() == raw_event_name:
             cleaned_payload[event_key] = event_name
@@ -419,6 +426,14 @@ def normalize_event(
 
 def finalize_event(envelope: Mapping[str, Any], config: Config) -> dict[str, Any]:
     """Apply the storage policy after enrichment, then fingerprint the stored data."""
+    if config.redact and envelope["event_name"] == "MessageDisplay":
+        from .stream_buffer import PendingMessage, buffer_key_path, chunk_fields
+
+        raw = dict(envelope)
+        raw["payload"] = dict(envelope["payload"])
+        chunk_fields(raw["payload"])
+        metadata = redact_value({**raw, "payload": {}})
+        return PendingMessage(metadata, raw, buffer_key_path(config))
     envelope = redact_value(dict(envelope)) if config.redact else dict(envelope)
     envelope["fingerprint"] = event_fingerprint(
         {
@@ -528,6 +543,20 @@ class EventStore:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS message_chunks (
+                stream TEXT NOT NULL,
+                idx INTEGER NOT NULL CHECK (idx >= 0 AND idx < 4096),
+                final INTEGER NOT NULL CHECK (final IN (0, 1)),
+                key_id TEXT NOT NULL,
+                nonce BLOB NOT NULL,
+                ciphertext BLOB NOT NULL,
+                PRIMARY KEY (stream, idx)
+            );
+            CREATE TABLE IF NOT EXISTS message_receipts (
+                stream TEXT PRIMARY KEY,
+                event_id INTEGER NOT NULL REFERENCES events(id)
+            );
             """
         )
         render_state_columns = {
@@ -546,7 +575,16 @@ class EventStore:
             pass
 
     def add_event(self, envelope: Mapping[str, Any]) -> tuple[int, bool]:
-        """Insert an event and return its id and whether it was newly added."""
+        """Return (id, inserted); (0, False) means encrypted chunks are still pending."""
+        from .stream_buffer import PendingMessage, stage_message
+
+        if isinstance(envelope, PendingMessage):
+            return stage_message(self, envelope)
+        with self.connection:
+            return self._insert_event(envelope)
+
+    def _insert_event(self, envelope: Mapping[str, Any]) -> tuple[int, bool]:
+        """Insert inside the caller's transaction."""
         cursor = self.connection.execute(
             """
             INSERT OR IGNORE INTO events (
@@ -571,7 +609,6 @@ class EventStore:
                 envelope.get("received_at", now_iso()),
             ),
         )
-        self.connection.commit()
         if cursor.rowcount:
             self._session_groups = None
             return int(cursor.lastrowid), True

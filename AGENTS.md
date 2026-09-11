@@ -8,6 +8,7 @@ Obsidian Vault向けのMarkdownへ変換するPython 3.11以上のCLIです。
 
 - `src/agent_session_exporter/core.py`: 設定、イベント正規化、SQLite保存
 - `src/agent_session_exporter/redaction.py`: ライブラリによる資格情報検出とマスク
+- `src/agent_session_exporter/stream_buffer.py`: 分割メッセージの暗号化保管と鍵の管理
 - `src/agent_session_exporter/adapters.py`: transcriptやhookイベントから会話を復元
 - `src/agent_session_exporter/renderer.py`: Markdown生成とVault同期
 - `src/agent_session_exporter/cli.py`: `ase` コマンドの入口
@@ -33,6 +34,9 @@ Workerの資格情報検出にはSecretlintを使用し、`deploy/cloudflare-wor
 
 SQLiteのappend-only保存とfingerprintによる重複排除、credentialのredact、
 Vault外への書き込み防止を維持してください。非公開DBやDOMのscrapeには依存しません。
+分割メッセージは暗号化して保管し、全文をマスクしてから通常イベントへ追加します。
+暗号鍵をDB・Vault・リポジトリに保存しないことと、鍵や検出処理の異常時に
+平文保存へ戻さないことを維持してください。端末やWorker実行環境の侵害は対象外です。
 
 ## 今後の課題
 

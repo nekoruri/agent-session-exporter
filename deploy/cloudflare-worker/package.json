@@ -6,7 +6,7 @@
     "node": ">=22.0.0"
   },
   "scripts": {
-    "test": "node --test",
+    "test": "node --test test/*.test.js",
     "check": "npm test && wrangler deploy --dry-run",
     "deploy": "wrangler deploy",
     "migrate": "wrangler d1 migrations apply agent-session-exporter --remote"

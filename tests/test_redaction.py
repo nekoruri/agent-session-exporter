@@ -29,6 +29,7 @@ def config_for(root: Path, *, redact: bool = True) -> Config:
         vault_path=root / "vault", destination="archive", state_dir=root / "state",
         device_id="test-device", redact=redact, include_tool_details=False,
         sync_on_capture=True, project_aliases={}, claude_cloud=ClaudeCloudConfig(),
+        buffer_key_path=root / "keys" / "buffer.json",
     )
 
 

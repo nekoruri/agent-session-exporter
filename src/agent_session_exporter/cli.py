@@ -95,6 +95,11 @@ def _build_parser() -> argparse.ArgumentParser:
     capture.add_argument("--source", required=True)
     capture.add_argument("--verbose", action="store_true")
 
+    keys = subparsers.add_parser("buffer-keys", help="initialize or rotate local message-buffer keys")
+    key_action = keys.add_mutually_exclusive_group()
+    key_action.add_argument("--rotate", action="store_true", help="add an active key, retaining old keys")
+    key_action.add_argument("--retire", metavar="KEY_ID", help="remove an unused old key")
+
     subparsers.add_parser("sync", help="render changed sessions to the Vault")
 
     migrate = subparsers.add_parser(
@@ -330,6 +335,14 @@ def run(arguments: Sequence[str] | None = None) -> int:
         return _capture(args, config_path)
 
     config = load_config(config_path)
+    if args.command == "buffer-keys":
+        import json
+        from .stream_buffer import buffer_key_path, manage_keys
+
+        with EventStore(config.state_dir) as store:
+            result = manage_keys(store, buffer_key_path(config), rotate=args.rotate, retire=args.retire)
+        print(json.dumps(result))
+        return 0
     if args.command == "sync":
         written, unchanged = sync_vault(config)
         print(f"written={written} unchanged={unchanged}")

@@ -3,87 +3,18 @@ import test from "node:test";
 
 import worker, { MAX_BODY_BYTES } from "../src/index.js";
 import { redactValue } from "../src/redaction.js";
-
-class FakeStatement {
-  constructor(database, sql) {
-    this.database = database;
-    this.sql = sql;
-    this.values = [];
-  }
-
-  bind(...values) {
-    this.values = values;
-    return this;
-  }
-
-  async run() {
-    assert.match(this.sql, /INSERT OR IGNORE INTO events/);
-    const [
-      fingerprint,
-      source,
-      deviceId,
-      sessionId,
-      eventName,
-      occurredAt,
-      cwd,
-      project,
-      repository,
-      branch,
-      transcriptPath,
-      payloadJson,
-      receivedAt,
-    ] = this.values;
-    if (this.database.rows.some((row) => row.fingerprint === fingerprint)) {
-      return { meta: { changes: 0 } };
-    }
-    this.database.rows.push({
-      id: this.database.nextId,
-      fingerprint,
-      source,
-      device_id: deviceId,
-      session_id: sessionId,
-      event_name: eventName,
-      occurred_at: occurredAt,
-      cwd,
-      project,
-      repository,
-      branch,
-      transcript_path: transcriptPath,
-      payload_json: payloadJson,
-      received_at: receivedAt,
-    });
-    this.database.nextId += 1;
-    return { meta: { changes: 1 } };
-  }
-
-  async all() {
-    assert.match(this.sql, /FROM events WHERE id > \?/);
-    const [after, limit] = this.values;
-    return {
-      results: this.database.rows
-        .filter((row) => row.id > after)
-        .slice(0, limit),
-    };
-  }
-}
-
-class FakeD1 {
-  constructor() {
-    this.rows = [];
-    this.nextId = 1;
-  }
-
-  prepare(sql) {
-    return new FakeStatement(this, sql);
-  }
-}
+import { TestD1 } from "./database.js";
+import { createHash, randomBytes } from "node:crypto";
 
 function environment(overrides = {}) {
+  const key = randomBytes(32);
+  const active = createHash("sha256").update(key).digest("hex").slice(0, 16);
   return {
-    DB: new FakeD1(),
+    DB: new TestD1(),
     DEVICE_ID: "claude-cloud",
     INGEST_TOKEN: "ingest-secret",
     PULL_TOKEN: "pull-secret",
+    BUFFER_ENCRYPTION_KEYS: JSON.stringify({ active, keys: { [active]: key.toString("hex") } }),
     ...overrides,
   };
 }

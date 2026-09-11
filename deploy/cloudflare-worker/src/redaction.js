@@ -2,7 +2,7 @@ import { lintSource } from "@secretlint/core";
 import { creator as preset } from "@secretlint/secretlint-rule-preset-recommend";
 
 const REDACTED = "[REDACTED]";
-const IDENTITY_KEYS = new Set(["id", "session_id", "sessionId", "task_id", "taskId", "device_id", "deviceId"]);
+const IDENTITY_KEYS = new Set(["id", "session_id", "sessionId", "task_id", "taskId", "device_id", "deviceId", "message_id", "messageId"]);
 // Field names and protocol syntax are policy; provider formats belong to Secretlint.
 const SECRET_KEY_RE =
   /(?:^|[_-])(?:api[_-]?key|private[_-]?key|access[_-]?token|client[_-]?secret|secret|token|password|passwd|authorization|cookie)(?:$|[_-])/i;
