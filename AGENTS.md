@@ -33,3 +33,10 @@ Workerの資格情報検出にはSecretlintを使用し、`deploy/cloudflare-wor
 
 SQLiteのappend-only保存とfingerprintによる重複排除、credentialのredact、
 Vault外への書き込み防止を維持してください。非公開DBやDOMのscrapeには依存しません。
+
+## 今後の課題
+
+Python製CLIとJavaScript製Workerの実装をTypeScriptへ統一することを検討します。
+資格情報の検出・マスク処理とテストを共有し、挙動のずれと二重保守を減らすことが目的です。
+移行する場合は、既存のSQLite形式・fingerprintによる重複排除・CLI・Markdown出力の
+互換性を維持し、共通処理から段階的に進めます。
