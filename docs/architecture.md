@@ -9,10 +9,14 @@ Vaultへは直接同期しない。取得・正規化・描画を分離し、別
 
 1. ローカルの`capture`、Cloud poller、export importerがイベントを受け取る。
 2. Claude Code on the webのcommand hookがcurlでWorkerへ転送し、D1へ保存する。
-3. `normalize_event`がsource、device、session、時刻、project情報を付与し、
-   credentialらしい値をredactする。Workerでも同等の処理を先に行う。
+3. `normalize_event`がsource、device、session、時刻、project情報を付与する。
+   `finalize_event`は全取込経路でメタデータ付与後に資格情報をマスクし、
+   保存する値からfingerprintを計算する。検出ルールはPythonではdetect-secrets、
+   WorkerではSecretlintを使用し、ベンダーごとのパターンは自前で保守しない。
 4. SQLiteへappend-onlyで保存する。同じfingerprintのイベントは追加しない。
 5. adapterがtranscriptまたはhook payloadからuser/assistant messageを復元する。
+   rendererは復元・結合後の本文、タイトル、diff、メタデータを再度マスクする。
+   既存イベントにも適用するが、append-onlyのイベント自体は書き換えない。
 6. ローカルhookでは対象セッションだけを即時同期する。timerやpullでは全変更を
    探し、セッションごとの安定したパスへMarkdownを原子的に書く。
 
@@ -58,6 +62,8 @@ commitまでは行わない。VaultがGit管理されていても、commit/push�
 - command hookは`CLAUDE_CODE_REMOTE=true`のときだけcurlを実行する。
 - Workerも`X-Claude-Code-Remote: true`のrequestだけを受け付ける。
 - Workerはevent名を固定listで検証し、credentialをredactしてからD1へ保存する。
+- 検出時の外部APIによる資格情報の検証は行わない。会話内のallowlistコメントを
+  検出除外として解釈せず、検出処理が失敗した場合も平文の保存・出力へ戻さない。
 - Workerとローカルの双方でfingerprintを再計算する。
 - `transcript_path`はWorkerで破棄し、remoteから指定されたpathをローカルで読まない。
 - request bodyとpull件数に上限を設ける。D1は外部から直接公開しない。

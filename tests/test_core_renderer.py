@@ -49,7 +49,7 @@ class CoreRendererTest(unittest.TestCase):
             payload = {
                 "session_id": "session-1",
                 "hook_event_name": "UserPromptSubmit",
-                "prompt": "use sk-secretsecretsecret",
+                "prompt": "use " + "ghp_" + "a" * 36,
                 "api_key": "do-not-store",
             }
             envelope = normalize_event(payload, "codex-cli", config)

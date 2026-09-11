@@ -31,6 +31,7 @@ from .hooks import (
     install_local_hooks,
 )
 from .importers import import_export
+from .redaction import redact_text
 from .renderer import (
     migrate_render_state,
     render_state_path_issues,
@@ -41,6 +42,14 @@ from .renderer import (
 
 def _config_path(value: str | None) -> Path:
     return Path(value).expanduser() if value else default_config_path()
+
+
+def _error_detail(error: object) -> str:
+    """Diagnostics must not echo credentials from remote or subprocess errors."""
+    try:
+        return redact_text(str(error))
+    except Exception:
+        return "Details omitted because credential redaction failed."
 
 
 def _valid_destination(value: str) -> str:
@@ -221,7 +230,7 @@ def _capture(args: argparse.Namespace, config_path: Path) -> int:
                 str(envelope["session_id"]),
             )
         except (OSError, TypeError, ValueError) as error:
-            print(f"warning: Vault sync failed: {error}", file=sys.stderr)
+            print(f"warning: Vault sync failed: {_error_detail(error)}", file=sys.stderr)
     if args.verbose:
         print(
             f"event={event_id} inserted={str(inserted).lower()}",
@@ -339,7 +348,7 @@ def run(arguments: Sequence[str] | None = None) -> int:
                 f"{migration.old_path} -> {migration.new_path}{backup}"
             )
         for error in errors:
-            print(f"error: {error}", file=sys.stderr)
+            print(f"error: {_error_detail(error)}", file=sys.stderr)
         print(
             f"planned={len(migrations)} applied="
             f"{len(migrations) if args.apply else 0} errors={len(errors)}"
@@ -394,5 +403,5 @@ def main() -> None:
     except KeyboardInterrupt:
         raise SystemExit(130) from None
     except (OSError, TypeError, ValueError, RuntimeError) as error:
-        print(f"error: {error}", file=sys.stderr)
+        print(f"error: {_error_detail(error)}", file=sys.stderr)
         raise SystemExit(1) from None

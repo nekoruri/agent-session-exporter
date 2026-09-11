@@ -3,6 +3,12 @@
 Claude Code on the webのcommand hookからイベントを受け、redact後にD1へ保存します。
 Vaultやローカル端末をインターネットへ公開する必要はありません。
 
+資格情報の検出にはSecretlintの推奨ルールを使います。認証フィールドとURL内の
+ユーザー情報も除去し、会話中の`secretlint-disable`コメントは受け付けません。
+資格情報を外部へ送って検証する処理はありません。ルール更新はnpm依存を更新して
+テストし、`npm run check`でWorkerのビルドを確認します。`nodejs_compat`は
+Secretlintが使うNode.js APIのために必要です。
+
 ## Deploy
 
 Node.js 22以上とCloudflare accountを用意します。初回の`deploy`でWorkerとD1が

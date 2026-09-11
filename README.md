@@ -225,10 +225,30 @@ frontmatterの時刻は、`updated_at`が最後のイベント、`rendered_at`�
 実際に書いた時刻です。`archived_at`は完了または失敗したセッションだけに付き、
 継続可能な`active`と`stopped`には付きません。
 
-機密情報対策として、token、password、API key等の名前を持つJSON fieldと、
-代表的なcredential文字列を取り込み時にredactします。ただし万能ではありません。
+`redact = true`（既定）では、token、password、API key等のJSON fieldを値ごと
+マスクします。会話中の資格情報はPython側で
+[detect-secrets](https://github.com/Yelp/detect-secrets)、Worker側で
+[Secretlint](https://github.com/secretlint/secretlint)の検出ルールを使います。
+URLのユーザー情報と機密クエリ、Bearer/Basic認証の値も除去します。
+検出はローカルで完結し、トークンの有効性を確かめる外部通信は行いません。
+Python側は引用符のない会話中のトークンも、ライブラリの文字列のランダムさを
+調べる機能で検出します。この判定には見逃しと過剰なマスクの両方があり得ます。
+
+SQLite/D1への保存前に加え、transcriptの読込・分割メッセージの結合後にも
+マスクします。Codex Cloudのタスク・diff・プロンプト、importした会話のタイトル、
+Gitから補ったメタデータも対象です。Python側で秘密鍵のヘッダーを検出した場合は、
+鍵の本体が残らないよう、その本文フィールド全体をマスクします。
+
+検出できる形式は各ライブラリのルールに依存し、未知の形式や任意の秘密文を
+すべて検出する保証はありません。WorkerとPythonで検出範囲が異なる場合もあります。
 Vaultを同期・共有する前に内容を確認してください。toolの詳細はデフォルトでは
 Markdownへ出力しません。
+
+更新後の`ase sync`では既存イベントから作るノートにも新しいマスクを適用します。
+ただし、元のtranscript、既存のSQLite/D1イベント、バックアップは書き換えません。
+過去に保存・共有した資格情報は別途点検してください。`redact = false`はPython側の
+保存・出力のマスクを無効にしますが、Worker側のマスクは常に有効です。
+CLIのエラー診断も、外部サービスやコマンドが資格情報を返す場合に備えて常にマスクします。
 
 ## 開発
 

@@ -1,3 +1,5 @@
+import { redactValue } from "./redaction.js";
+
 const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_PULL_LIMIT = 500;
 const CLAUDE_CLOUD_EVENTS = new Map(
@@ -9,13 +11,6 @@ const CLAUDE_CLOUD_EVENTS = new Map(
     "SessionEnd",
   ].map((name) => [name.toLowerCase(), name]),
 );
-const SECRET_KEY_RE =
-  /(?:^|[_-])(?:api[_-]?key|access[_-]?token|client[_-]?secret|secret|token|password|passwd|authorization|cookie)(?:$|[_-])/i;
-const SECRET_VALUE_RES = [
-  /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi,
-  /\bsk-[A-Za-z0-9_-]{12,}/g,
-  /\b(?:gh[opsu]_|github_pat_)[A-Za-z0-9_]{12,}/g,
-];
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -56,29 +51,6 @@ function requireToken(request, expected) {
   if (!sameSecret(bearerToken(request), expected)) {
     throw new HttpError(401, "unauthorized");
   }
-}
-
-function redactText(value) {
-  let result = value;
-  for (const pattern of SECRET_VALUE_RES) {
-    result = result.replace(pattern, "[REDACTED]");
-  }
-  return result;
-}
-
-function redactValue(value, key = "") {
-  if (key && SECRET_KEY_RE.test(key)) return "[REDACTED]";
-  if (typeof value === "string") return redactText(value);
-  if (Array.isArray(value)) return value.map((item) => redactValue(item));
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([childKey, childValue]) => [
-        childKey,
-        redactValue(childValue, childKey),
-      ]),
-    );
-  }
-  return value;
 }
 
 function stableValue(value) {
@@ -138,7 +110,7 @@ async function normalizeEvent(rawPayload, env) {
   ) {
     throw new HttpError(400, "request body must be a JSON object");
   }
-  const payload = redactValue(rawPayload);
+  const payload = await redactValue(rawPayload);
   delete payload.transcript_path;
   delete payload.transcriptPath;
 

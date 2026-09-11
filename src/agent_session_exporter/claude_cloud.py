@@ -15,9 +15,8 @@ from .core import (
     Config,
     EventStore,
     canonical_event_name,
-    event_fingerprint,
+    finalize_event,
     now_iso,
-    redact_value,
 )
 
 CLAUDE_CLOUD_EVENTS = {
@@ -91,7 +90,7 @@ def _remote_envelope(config: Config, value: Mapping[str, Any]) -> dict[str, Any]
     payload = value["payload"]
     if not isinstance(payload, Mapping):
         raise TypeError("Remote event payload must be a JSON object.")
-    cleaned_payload = redact_value(dict(payload)) if config.redact else dict(payload)
+    cleaned_payload = dict(payload)
     cleaned_payload.pop("transcript_path", None)
     cleaned_payload.pop("transcriptPath", None)
     for event_key in ("hook_event_name", "event_name", "event", "type"):
@@ -112,20 +111,7 @@ def _remote_envelope(config: Config, value: Mapping[str, Any]) -> dict[str, Any]
         "payload": cleaned_payload,
         "received_at": str(value.get("received_at") or now_iso()),
     }
-    envelope["fingerprint"] = event_fingerprint(
-        {
-            key: envelope[key]
-            for key in (
-                "source",
-                "device_id",
-                "session_id",
-                "event_name",
-                "occurred_at",
-                "payload",
-            )
-        }
-    )
-    return envelope
+    return finalize_event(envelope, config)
 
 
 def pull_events(config: Config, *, limit: int = 500) -> tuple[int, int]:

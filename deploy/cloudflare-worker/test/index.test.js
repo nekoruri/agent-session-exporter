@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import worker, { MAX_BODY_BYTES } from "../src/index.js";
+import { redactValue } from "../src/redaction.js";
 
 class FakeStatement {
   constructor(database, sql) {
@@ -109,6 +110,62 @@ function sampleEvent(overrides = {}) {
     ...overrides,
   };
 }
+
+test("library detection masks complete credentials before D1 storage without network calls", async (t) => {
+  t.mock.method(globalThis, "fetch", () => {
+    throw new Error("credential detection must stay offline");
+  });
+  const env = environment();
+  const github = "ghp_" + "a".repeat(36);
+  const openai = "sk-" + "a".repeat(20) + "T3BlbkFJ" + "b".repeat(20);
+  const payload = sampleEvent({
+    prompt: `Keep this text. ${github} ${openai}`,
+    repository: "https://user:p%40ss!word@example.invalid/repo.git?token=short&view=1",
+    nested: [{ privateKey: "custom-format", accessToken: "short" }],
+  });
+  for (let i = 0; i < 2; i += 1) {
+    assert.equal((await worker.fetch(hookRequest(payload), env)).status, 202);
+  }
+  assert.equal(env.DB.rows.length, 1);
+  const stored = JSON.stringify(env.DB.rows);
+  for (const secret of [github, "a".repeat(36), openai, "p%40ss", "custom-format", "token=short"]) {
+    assert.equal(stored.includes(secret), false);
+  }
+  const saved = JSON.parse(env.DB.rows[0].payload_json);
+  assert.match(saved.prompt, /^Keep this text\. \[REDACTED\] \[REDACTED\]$/);
+  assert.deepEqual(saved.nested, [{ privateKey: "[REDACTED]", accessToken: "[REDACTED]" }]);
+  assert.match(saved.repository, /view=1/);
+  assert.equal(globalThis.fetch.mock.callCount(), 0);
+});
+
+test("conversation comments cannot disable Secretlint", async () => {
+  const github = "ghp_" + "a".repeat(36);
+  for (const comment of ["// secretlint-disable", "<!-- secretlint-disable -->"]) {
+    const masked = await redactValue(`${comment}\n${github}`);
+    assert.equal(masked.includes(github), false);
+    assert.equal(masked.includes("a".repeat(36)), false);
+  }
+});
+
+test("private key bodies and authorization schemes are fully masked", async () => {
+  const body = "MI" + "A".repeat(128);
+  const pem = `-----BEGIN PRIVATE KEY-----\n${body}\n-----END PRIVATE KEY-----`;
+  const result = await redactValue({ message: pem, headers: ["Bearer short", "Basic dXNlcjpwYXNz"] });
+  assert.equal(result.message, "[REDACTED]");
+  assert.deepEqual(result.headers, ["[REDACTED]", "[REDACTED]"]);
+});
+
+test("ordinary text and JSON types survive masking, which is idempotent", async () => {
+  const input = {
+    text: "Please fix issue 123. See https://example.invalid/docs.",
+    count: 3,
+    done: false,
+    nested: [null, "203.0.113.1"],
+  };
+  assert.deepEqual(await redactValue(input), input);
+  const masked = await redactValue({ prompt: "ghp_" + "a".repeat(36) });
+  assert.deepEqual(await redactValue(masked), masked);
+});
 
 test("health reports whether bindings and secrets are configured", async () => {
   const healthy = await worker.fetch(

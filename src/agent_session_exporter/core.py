@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import socket
 import sqlite3
 import subprocess
@@ -18,18 +17,10 @@ from pathlib import Path
 from typing import Any, Self
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .redaction import redact_text, redact_value
+
 CONFIG_FILE_NAME = "config.toml"
 DEFAULT_DESTINATION = "ai-sessions"
-SECRET_KEY_RE = re.compile(
-    r"(?:^|[_-])(?:api[_-]?key|access[_-]?token|client[_-]?secret|"
-    r"secret|token|password|passwd|authorization|cookie)(?:$|[_-])",
-    re.IGNORECASE,
-)
-SECRET_VALUE_RES = [
-    re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{12,}", re.IGNORECASE),
-    re.compile(r"\bsk-[A-Za-z0-9_-]{12,}"),
-    re.compile(r"\b(?:gh[opsu]_|github_pat_)[A-Za-z0-9_]{12,}"),
-]
 UTC_TIMEZONE_NAMES = {"UTC", "Etc/UTC", "Etc/GMT", "GMT"}
 CANONICAL_EVENT_NAMES = {
     name.casefold(): name
@@ -246,30 +237,6 @@ def render_initial_config(
     )
 
 
-def redact_text(value: str) -> str:
-    """Redact common credential shapes from text."""
-    result = value
-    for pattern in SECRET_VALUE_RES:
-        result = pattern.sub("[REDACTED]", result)
-    return result
-
-
-def redact_value(value: Any, key: str = "") -> Any:
-    """Recursively redact credentials without altering JSON structure."""
-    if key and SECRET_KEY_RE.search(key):
-        return "[REDACTED]"
-    if isinstance(value, str):
-        return redact_text(value)
-    if isinstance(value, list):
-        return [redact_value(item) for item in value]
-    if isinstance(value, dict):
-        return {
-            str(child_key): redact_value(child_value, str(child_key))
-            for child_key, child_value in value.items()
-        }
-    return value
-
-
 def canonical_json(value: Any) -> str:
     """Serialize JSON deterministically."""
     return json.dumps(
@@ -379,7 +346,7 @@ def normalize_event(
     inspect_cwd: bool = True,
 ) -> dict[str, Any]:
     """Convert a raw hook or imported payload into the internal envelope."""
-    cleaned_payload = redact_value(dict(payload)) if config.redact else dict(payload)
+    cleaned_payload = dict(payload)
     session_id = _first_string(
         cleaned_payload,
         ["session_id", "sessionId", "task_id", "taskId", "id"],
@@ -446,6 +413,12 @@ def normalize_event(
         "payload": cleaned_payload,
         "received_at": now_iso(),
     }
+    return finalize_event(envelope, config)
+
+
+def finalize_event(envelope: Mapping[str, Any], config: Config) -> dict[str, Any]:
+    """Apply the storage policy after enrichment, then fingerprint the stored data."""
+    envelope = redact_value(dict(envelope)) if config.redact else dict(envelope)
     envelope["fingerprint"] = event_fingerprint(
         {
             key: envelope[key]
