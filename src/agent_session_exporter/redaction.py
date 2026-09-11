@@ -107,6 +107,13 @@ def redact_text(value: str) -> str:
         result = cleaned
 
 
+def canonical_identity(value: str) -> str:
+    """Compare raw and pseudonymized IDs without depending on current detector rules."""
+    if re.fullmatch(r"redacted-[0-9a-f]{64}", value):
+        return value
+    return "redacted-" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
 def redact_value(value: Any, key: str = "") -> Any:
     """Mask credential fields in full and scan text while preserving JSON types."""
     if key and _secret_key(key):
@@ -115,7 +122,7 @@ def redact_value(value: Any, key: str = "") -> Any:
         masked = redact_text(value)
         if key in IDENTITY_KEYS and masked != value:
             # A shared marker would merge unrelated sessions/devices during storage or rendering.
-            return "redacted-" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+            return canonical_identity(value)
         return masked
     if isinstance(value, list):
         return [redact_value(item) for item in value]

@@ -560,11 +560,16 @@ def _sync_stored_session(
         document = SessionDocument(**values)
     source_content = render_markdown(document)
     source_hash = hashlib.sha256(source_content.encode("utf-8")).hexdigest()
-    key = store.session_key(source, device_id, session_id)
-    state = store.get_render_state(key)
+    aliases = store.session_aliases(source, device_id, session_id)
+    alias_keys = [store.session_key(*alias) for alias in aliases]
+    states = [state for alias_key in alias_keys
+              if (state := store.get_render_state(alias_key)) is not None]
+    # Reuse an existing path even when capture supplied the newly pseudonymized key.
+    state = states[0] if states else None
+    key = str(state["session_key"]) if state is not None else alias_keys[0]
     if state is not None:
         note_path = PurePosixPath(str(state["note_path"]))
-        if str(state["source_hash"]) == source_hash:
+        if str(state["source_hash"]) == source_hash and len(states) == 1:
             return False
     else:
         note_path = _new_note_path(
@@ -576,13 +581,41 @@ def _sync_stored_session(
     content = render_markdown(document, rendered_at=rendered_at)
     content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
     target = _safe_note_path(config.vault_path, note_path)
+    obsolete_paths: set[Path] = set()
+    if len(states) > 1:
+        # Repair notes already split by an older exporter, preserving any user edits.
+        expected: dict[Path, set[str]] = {}
+        for old_state in states:
+            path = _safe_note_path(config.vault_path, PurePosixPath(str(old_state["note_path"])))
+            expected.setdefault(path, set()).add(str(old_state["content_hash"]))
+        for other in store.list_render_states():
+            if str(other["session_key"]) in alias_keys:
+                continue
+            path = _safe_note_path(config.vault_path, PurePosixPath(str(other["note_path"])))
+            if path in expected:
+                raise ValueError(f"refusing note shared with a different session: {path}")
+        for path, hashes in expected.items():
+            if not path.exists():
+                continue
+            old_content, actual_hash, problem = _generated_note(path)
+            # A previous attempt may have written the complete note before cleanup/state failed.
+            complete_retry = path == target and re.sub(
+                r"^rendered_at: [^\n]*\n", "", old_content, count=1, flags=re.MULTILINE,
+            ) == source_content
+            if problem or (actual_hash not in hashes and not complete_retry):
+                raise ValueError(problem or f"content differs from render state: {path}")
+            if path != target:
+                obsolete_paths.add(path)
     _atomic_write(target, content)
+    for path in obsolete_paths:
+        path.unlink()
     store.set_render_state(
         key,
         content_hash,
         note_path.as_posix(),
         source_hash=source_hash,
         rendered_at=rendered_at,
+        superseded_keys=alias_keys,
     )
     return True
 

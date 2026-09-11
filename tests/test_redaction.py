@@ -1,21 +1,23 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import tempfile
 import unittest
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from unittest.mock import patch
 from uuid import UUID
 
+from agent_session_exporter.adapters import Message, SessionDocument, build_session_document
 from agent_session_exporter.claude_cloud import _remote_envelope
 from agent_session_exporter.cli import main
 from agent_session_exporter.codex_cloud import exec_codex_cloud, sync_codex_cloud
 from agent_session_exporter.core import ClaudeCloudConfig, Config, EventStore, normalize_event
 from agent_session_exporter.importers import import_export
-from agent_session_exporter.redaction import REDACTED, redact_text, redact_value
-from agent_session_exporter.renderer import sync_session, sync_vault
+from agent_session_exporter.redaction import REDACTED, canonical_identity, redact_text, redact_value
+from agent_session_exporter.renderer import _new_note_path, render_markdown, sync_session, sync_vault
 
 # Synthetic values with provider-valid shapes, never real credentials.
 GITHUB = "ghp_" + "a" * 36
@@ -34,7 +36,180 @@ def note_content(config: Config) -> str:
     return "\n".join(path.read_text() for path in config.vault_path.rglob("*.md"))
 
 
+def write_pre_fix_note(config: Config, event) -> Path:
+    """Reproduce a render state created before raw/pseudonymized keys were grouped."""
+    document = build_session_document([event])
+    if config.redact:
+        values = redact_value(asdict(document))
+        values["messages"] = [Message(**message) for message in values["messages"]]
+        document = SessionDocument(**values)
+    path = _new_note_path(document, config.destination, config.path_timezone)
+    content = render_markdown(document, rendered_at="2026-09-12T00:01:00Z")
+    target = config.vault_path / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content)
+    with EventStore(config.state_dir) as store:
+        store.set_render_state(
+            store.session_key(event.source, event.device_id, event.session_id),
+            hashlib.sha256(content.encode()).hexdigest(), path.as_posix(),
+            source_hash=hashlib.sha256(render_markdown(document).encode()).hexdigest(),
+        )
+    return target
+
+
 class RedactionTest(unittest.TestCase):
+    def test_legacy_and_pseudonymized_sessions_reuse_one_complete_note(self) -> None:
+        opaque = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+        for identity in ("session", "device", "both"):
+            for prior_state in ("unrendered", "legacy-note", "split", "overwritten"):
+                for immediate in (False, True):
+                    with self.subTest(identity=identity, prior_state=prior_state, immediate=immediate), \
+                            tempfile.TemporaryDirectory() as directory:
+                        config = config_for(Path(directory))
+                        if identity in ("device", "both"):
+                            config = replace(config, device_id=opaque)
+                        session = opaque if identity in ("session", "both") else "session-1"
+                        legacy_config = replace(config, redact=False)
+                        legacy = normalize_event({
+                            "session_id": session, "hook_event_name": "UserPromptSubmit",
+                            "timestamp": "2026-09-12T00:00:01Z", "prompt": "legacy-only-message",
+                        }, "claude-code", legacy_config, inspect_cwd=False)
+                        with EventStore(config.state_dir) as store:
+                            store.add_event(legacy)
+                            old_event = store.list_events()[0]
+                        original_path = None
+                        if prior_state != "unrendered":
+                            original_path = write_pre_fix_note(
+                                config if prior_state == "overwritten" else legacy_config, old_event,
+                            )
+                        current = normalize_event({
+                            "session_id": session, "hook_event_name": "UserPromptSubmit",
+                            "timestamp": "2026-09-12T00:00:02Z", "prompt": "new-only-message",
+                        }, "claude-code", config, inspect_cwd=False)
+                        with EventStore(config.state_dir) as store:
+                            store.add_event(current)
+                            before = [asdict(event) for event in store.list_events()]
+                            new_event = store.list_events()[-1]
+                            self.assertEqual(len(store.list_session_keys()), 1)
+                            for envelope in (legacy, current):
+                                events = store.session_events(
+                                    envelope["source"], envelope["device_id"], envelope["session_id"],
+                                )
+                                self.assertEqual([asdict(event) for event in events], before)
+                        if prior_state in ("split", "overwritten"):
+                            write_pre_fix_note(config, new_event)
+                        if immediate:
+                            self.assertTrue(sync_session(
+                                config, current["source"], current["device_id"], current["session_id"],
+                            ))
+                        else:
+                            self.assertEqual(sync_vault(config), (1, 0))
+                        paths = list(config.vault_path.rglob("*.md"))
+                        self.assertEqual(len(paths), 1)
+                        if original_path is not None:
+                            self.assertEqual(paths, [original_path])
+                        text = paths[0].read_text()
+                        self.assertIn("legacy-only-message", text)
+                        self.assertIn("new-only-message", text)
+                        self.assertNotIn(opaque, text)
+                        self.assertEqual(sync_vault(config), (0, 1))
+                        with EventStore(config.state_dir) as store:
+                            self.assertEqual([asdict(event) for event in store.list_events()], before)
+                            self.assertEqual(len(store.list_render_states()), 1)
+                        # Toggling output redaction must not split the session again.
+                        sync_vault(legacy_config)
+                        self.assertEqual(list(config.vault_path.rglob("*.md")), paths)
+
+    def test_alias_lookup_keeps_sources_devices_and_sessions_distinct(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = config_for(Path(directory), redact=False)
+            device, session = "legacy-device", "legacy-session"
+            with EventStore(config.state_dir) as store:
+                for index, (source, current_device, current_session) in enumerate((
+                    ("claude-code", device, session),
+                    ("claude-code", canonical_identity(device), session),
+                    ("claude-code", device, canonical_identity(session)),
+                    ("claude-code", canonical_identity(device), canonical_identity(session)),
+                    ("claude-code", "other-device", session),
+                    ("claude-code", device, "other-session"),
+                    ("codex-cli", device, session),
+                )):
+                    store.add_event(normalize_event({
+                        "session_id": current_session, "prompt": str(index),
+                    }, source, config, device_id=current_device, inspect_cwd=False))
+                    # Exercise cache invalidation as new aliases are added.
+                    self.assertEqual(len(store.list_session_keys()), max(1, index - 2))
+                with patch("agent_session_exporter.redaction._detectors", side_effect=AssertionError("scan")):
+                    self.assertEqual(len(store.list_session_keys()), 4)
+                    self.assertEqual([event.payload["prompt"] for event in store.session_events(
+                        "claude-code", canonical_identity(device), canonical_identity(session),
+                    )], ["0", "1", "2", "3"])
+
+    def test_split_note_repair_preserves_user_edits(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = config_for(Path(directory))
+            opaque = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+            for enabled in (False, True):
+                envelope = normalize_event({
+                    "session_id": opaque, "hook_event_name": "UserPromptSubmit",
+                    "timestamp": "2026-09-12T00:00:00Z", "prompt": f"message-{enabled}",
+                }, "claude-code", replace(config, redact=enabled), inspect_cwd=False)
+                with EventStore(config.state_dir) as store:
+                    store.add_event(envelope)
+                    event = store.list_events()[-1]
+                path = write_pre_fix_note(replace(config, redact=enabled), event)
+            path.write_text(path.read_text() + "\nUser annotation\n")
+            before = {note: note.read_bytes() for note in config.vault_path.rglob("*.md")}
+            with self.assertRaisesRegex(ValueError, "content differs from render state"):
+                sync_vault(config)
+            self.assertEqual({note: note.read_bytes() for note in config.vault_path.rglob("*.md")}, before)
+            with EventStore(config.state_dir) as store:
+                self.assertEqual(len(store.list_render_states()), 2)
+
+    def test_split_note_repair_preserves_other_owners_and_recovers_from_failures(self) -> None:
+        for failure in ("shared-owner", "write", "unlink", "state"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                config = config_for(Path(directory))
+                opaque = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                for enabled in (False, True):
+                    envelope = normalize_event({
+                        "session_id": opaque, "hook_event_name": "UserPromptSubmit",
+                        "timestamp": "2026-09-12T00:00:00Z", "prompt": f"message-{enabled}",
+                    }, "claude-code", replace(config, redact=enabled), inspect_cwd=False)
+                    with EventStore(config.state_dir) as store:
+                        store.add_event(envelope)
+                        event = store.list_events()[-1]
+                    path = write_pre_fix_note(replace(config, redact=enabled), event)
+                if failure == "shared-owner":
+                    with EventStore(config.state_dir) as store:
+                        store.set_render_state(
+                            store.session_key("claude-code", "other-device", "other-session"),
+                            hashlib.sha256(path.read_bytes()).hexdigest(),
+                            path.relative_to(config.vault_path).as_posix(),
+                        )
+                before = {note: note.read_bytes() for note in config.vault_path.rglob("*.md")}
+                if failure == "shared-owner":
+                    with self.assertRaisesRegex(ValueError, "shared with a different session"):
+                        sync_vault(config)
+                else:
+                    target = {
+                        "write": "agent_session_exporter.renderer._atomic_write",
+                        "unlink": "pathlib.Path.unlink",
+                        "state": "agent_session_exporter.core.EventStore.set_render_state",
+                    }[failure]
+                    with patch(target, side_effect=OSError("interrupted")):
+                        with self.assertRaisesRegex(OSError, "interrupted"):
+                            sync_vault(config)
+                if failure in ("shared-owner", "write"):
+                    self.assertEqual({note: note.read_bytes() for note in config.vault_path.rglob("*.md")}, before)
+                with EventStore(config.state_dir) as store:
+                    self.assertEqual(len(store.list_render_states()), 3 if failure == "shared-owner" else 2)
+                if failure != "shared-owner":
+                    self.assertEqual(sync_vault(config), (1, 0))
+                    self.assertEqual(len(list(config.vault_path.rglob("*.md"))), 1)
+                    self.assertIn("message-False", note_content(config))
+                    self.assertIn("message-True", note_content(config))
+
     def test_missing_session_id_deduplicates_after_redaction(self) -> None:
         for enabled in (True, False):
             with self.subTest(redact=enabled), tempfile.TemporaryDirectory() as directory:

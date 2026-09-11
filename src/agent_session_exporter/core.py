@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Self
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .redaction import redact_text, redact_value
+from .redaction import canonical_identity, redact_text, redact_value
 
 CONFIG_FILE_NAME = "config.toml"
 DEFAULT_DESTINATION = "ai-sessions"
@@ -466,6 +466,9 @@ class EventStore:
     """SQLite-backed durable event store."""
 
     def __init__(self, state_dir: Path) -> None:
+        self._session_groups: dict[
+            tuple[str, str, str], list[tuple[str, str, str]]
+        ] | None = None
         self.state_dir = state_dir
         self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
@@ -570,6 +573,7 @@ class EventStore:
         )
         self.connection.commit()
         if cursor.rowcount:
+            self._session_groups = None
             return int(cursor.lastrowid), True
         row = self.connection.execute(
             "SELECT id FROM events WHERE fingerprint = ?",
@@ -609,8 +613,10 @@ class EventStore:
         ).fetchall()
         return [self._row_to_event(row) for row in rows]
 
-    def list_session_keys(self) -> list[tuple[str, str, str]]:
-        """List distinct source, device, and session tuples."""
+    def _grouped_sessions(self) -> dict[tuple[str, str, str], list[tuple[str, str, str]]]:
+        if self._session_groups is not None:
+            return self._session_groups
+        # ponytail: scan distinct keys once per store; persist an alias index if capture latency grows.
         rows = self.connection.execute(
             """
             SELECT source, device_id, session_id, MIN(id) AS first_id
@@ -619,10 +625,21 @@ class EventStore:
             ORDER BY first_id
             """
         ).fetchall()
-        return [
-            (str(row["source"]), str(row["device_id"]), str(row["session_id"]))
-            for row in rows
-        ]
+        self._session_groups = {}
+        for row in rows:
+            source, device, session = str(row["source"]), str(row["device_id"]), str(row["session_id"])
+            canonical = (source, canonical_identity(device), canonical_identity(session))
+            self._session_groups.setdefault(canonical, []).append((source, device, session))
+        return self._session_groups
+
+    def list_session_keys(self) -> list[tuple[str, str, str]]:
+        """List logical sessions, keeping the earliest stored key as representative."""
+        return [aliases[0] for aliases in self._grouped_sessions().values()]
+
+    def session_aliases(self, source: str, device_id: str, session_id: str) -> list[tuple[str, str, str]]:
+        """Find stored raw/pseudonymized keys for the same source, device and session."""
+        canonical = (source, canonical_identity(device_id), canonical_identity(session_id))
+        return self._grouped_sessions().get(canonical, [(source, device_id, session_id)])
 
     def session_events(
         self,
@@ -631,15 +648,18 @@ class EventStore:
         session_id: str,
     ) -> list[StoredEvent]:
         """Load all events for one logical session."""
-        rows = self.connection.execute(
-            """
-            SELECT * FROM events
-            WHERE source = ? AND device_id = ? AND session_id = ?
-            ORDER BY id
-            """,
-            (source, device_id, session_id),
-        ).fetchall()
-        return [self._row_to_event(row) for row in rows]
+        events = []
+        for alias in self.session_aliases(source, device_id, session_id):
+            rows = self.connection.execute(
+                """
+                SELECT * FROM events
+                WHERE source = ? AND device_id = ? AND session_id = ?
+                ORDER BY id
+                """,
+                alias,
+            ).fetchall()
+            events.extend(self._row_to_event(row) for row in rows)
+        return sorted(events, key=lambda event: event.id)
 
     @staticmethod
     def session_key(source: str, device_id: str, session_id: str) -> str:
@@ -667,6 +687,7 @@ class EventStore:
         *,
         source_hash: str | None = None,
         rendered_at: str | None = None,
+        superseded_keys: Iterable[str] = (),
     ) -> None:
         """Persist the last rendered content hash and path."""
         self.connection.execute(
@@ -688,6 +709,10 @@ class EventStore:
                 source_hash,
                 source_hash,
             ),
+        )
+        self.connection.executemany(
+            "DELETE FROM render_state WHERE session_key = ? AND session_key <> ?",
+            ((key, session_key) for key in superseded_keys),
         )
         self.connection.commit()
 
