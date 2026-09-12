@@ -171,6 +171,8 @@ ase pull --sync
 
 hookが使う`INGEST_TOKEN`と、ローカル取得に使う`PULL_TOKEN`は別の値にします。
 Claude Cloud側のtokenが漏れても、保存済みイベントの読み取りには使えません。
+`ase pull`は認証情報の転送を防ぐためリダイレクトを拒否します。
+受信箱の`url`には、転送を経由せずAPIへ到達できるHTTPS originを指定してください。
 D1はappend-onlyの受信箱として扱い、取得後も自動削除しません。
 
 systemd user service例は
