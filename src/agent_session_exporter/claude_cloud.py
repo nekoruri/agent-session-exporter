@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -111,7 +112,10 @@ def _remote_envelope(config: Config, value: Mapping[str, Any]) -> dict[str, Any]
         "payload": cleaned_payload,
         "received_at": str(value.get("received_at") or now_iso()),
     }
-    return finalize_event(envelope, config)
+    identity_key = value.get("identity_key", "")
+    if not isinstance(identity_key, str) or (identity_key and not re.fullmatch(r"[0-9a-f]{64}", identity_key)):
+        raise ValueError("Remote event has an invalid identity_key.")
+    return finalize_event(envelope, config, identity_key=identity_key)
 
 
 def pull_events(config: Config, *, limit: int = 500) -> tuple[int, int]:

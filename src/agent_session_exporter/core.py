@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Self
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .redaction import canonical_identity, redact_text, redact_value
+from .redaction import redact_text, redact_value, session_identity
 
 CONFIG_FILE_NAME = "config.toml"
 DEFAULT_DESTINATION = "ai-sessions"
@@ -356,6 +356,7 @@ def normalize_event(
         cleaned_payload,
         ["session_id", "sessionId", "task_id", "taskId", "id"],
     )
+    supplied_session_id = session_id
     if not session_id:
         identity_payload = redact_value(cleaned_payload) if config.redact else cleaned_payload
         session_id = event_fingerprint(identity_payload)[:24]
@@ -368,7 +369,7 @@ def normalize_event(
         or "Unknown"
     )
     event_name = canonical_event_name(raw_event_name)
-    if config.redact and event_name == "MessageDisplay" and not _first_string(cleaned_payload, ["session_id", "sessionId"]):
+    if config.redact and event_name == "MessageDisplay" and not supplied_session_id:
         raise ValueError("MessageDisplay requires a session_id.")
     for event_key in ("hook_event_name", "event_name", "event", "type"):
         if str(cleaned_payload.get(event_key) or "").strip() == raw_event_name:
@@ -424,8 +425,15 @@ def normalize_event(
     return finalize_event(envelope, config)
 
 
-def finalize_event(envelope: Mapping[str, Any], config: Config) -> dict[str, Any]:
+def finalize_event(
+    envelope: Mapping[str, Any], config: Config, *, identity_key: str = "",
+) -> dict[str, Any]:
     """Apply the storage policy after enrichment, then fingerprint the stored data."""
+    # Only the authenticated Worker envelope may supply a pre-redaction identity.
+    # Raw hook payloads never control this field.
+    envelope = dict(envelope)
+    identity_key = identity_key or session_identity(envelope["device_id"], envelope["session_id"])
+    envelope["identity_key"] = identity_key
     if config.redact and envelope["event_name"] == "MessageDisplay":
         from .stream_buffer import PendingMessage, buffer_key_path, chunk_fields
 
@@ -433,8 +441,10 @@ def finalize_event(envelope: Mapping[str, Any], config: Config) -> dict[str, Any
         raw["payload"] = dict(envelope["payload"])
         chunk_fields(raw["payload"])
         metadata = redact_value({**raw, "payload": {}})
+        metadata["identity_key"] = identity_key
         return PendingMessage(metadata, raw, buffer_key_path(config))
     envelope = redact_value(dict(envelope)) if config.redact else dict(envelope)
+    envelope["identity_key"] = identity_key
     envelope["fingerprint"] = event_fingerprint(
         {
             key: envelope[key]
@@ -445,6 +455,7 @@ def finalize_event(envelope: Mapping[str, Any], config: Config) -> dict[str, Any
                 "event_name",
                 "occurred_at",
                 "payload",
+                "identity_key",
             )
         }
     )
@@ -469,6 +480,7 @@ class StoredEvent:
     transcript_path: str
     payload: dict[str, Any]
     received_at: str
+    identity_key: str = ""
 
     def to_envelope(self) -> dict[str, Any]:
         """Return the event as an API envelope."""
@@ -482,7 +494,7 @@ class EventStore:
 
     def __init__(self, state_dir: Path) -> None:
         self._session_groups: dict[
-            tuple[str, str, str], list[tuple[str, str, str]]
+            tuple[str, str], list[tuple[str, str, str, str]]
         ] | None = None
         self.state_dir = state_dir
         self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -568,6 +580,8 @@ class EventStore:
                 "ALTER TABLE render_state "
                 "ADD COLUMN source_hash TEXT NOT NULL DEFAULT ''"
             )
+        if "identity_key" not in {row["name"] for row in self.connection.execute("PRAGMA table_info(events)")}:
+            self.connection.execute("ALTER TABLE events ADD COLUMN identity_key TEXT NOT NULL DEFAULT ''")
         self.connection.commit()
         try:
             self.path.chmod(0o600)
@@ -590,8 +604,8 @@ class EventStore:
             INSERT OR IGNORE INTO events (
                 fingerprint, source, device_id, session_id, event_name,
                 occurred_at, cwd, project, repository, branch,
-                transcript_path, payload_json, received_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                transcript_path, payload_json, received_at, identity_key
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 envelope["fingerprint"],
@@ -607,6 +621,7 @@ class EventStore:
                 envelope.get("transcript_path", ""),
                 canonical_json(envelope.get("payload", {})),
                 envelope.get("received_at", now_iso()),
+                envelope.get("identity_key", ""),
             ),
         )
         if cursor.rowcount:
@@ -635,6 +650,7 @@ class EventStore:
             transcript_path=str(row["transcript_path"]),
             payload=json.loads(row["payload_json"]),
             received_at=str(row["received_at"]),
+            identity_key=str(row["identity_key"]),
         )
 
     def list_events(
@@ -650,47 +666,52 @@ class EventStore:
         ).fetchall()
         return [self._row_to_event(row) for row in rows]
 
-    def _grouped_sessions(self) -> dict[tuple[str, str, str], list[tuple[str, str, str]]]:
+    def _grouped_sessions(self) -> dict[tuple[str, str], list[tuple[str, str, str, str]]]:
         if self._session_groups is not None:
             return self._session_groups
         # ponytail: scan distinct keys once per store; persist an alias index if capture latency grows.
         rows = self.connection.execute(
             """
-            SELECT source, device_id, session_id, MIN(id) AS first_id
+            SELECT source, device_id, session_id, identity_key, MIN(id) AS first_id
             FROM events
-            GROUP BY source, device_id, session_id
+            GROUP BY source, device_id, session_id, identity_key
             ORDER BY first_id
             """
         ).fetchall()
         self._session_groups = {}
         for row in rows:
             source, device, session = str(row["source"]), str(row["device_id"]), str(row["session_id"])
-            canonical = (source, canonical_identity(device), canonical_identity(session))
-            self._session_groups.setdefault(canonical, []).append((source, device, session))
+            identity = str(row["identity_key"])
+            # Legacy rows have no provenance: treat their stored IDs as raw, never guess.
+            canonical = (source, identity or session_identity(device, session))
+            self._session_groups.setdefault(canonical, []).append((source, device, session, identity))
         return self._session_groups
 
-    def list_session_keys(self) -> list[tuple[str, str, str]]:
+    def list_session_keys(self) -> list[tuple[str, str, str, str]]:
         """List logical sessions, keeping the earliest stored key as representative."""
         return [aliases[0] for aliases in self._grouped_sessions().values()]
 
-    def session_aliases(self, source: str, device_id: str, session_id: str) -> list[tuple[str, str, str]]:
-        """Find stored raw/pseudonymized keys for the same source, device and session."""
-        canonical = (source, canonical_identity(device_id), canonical_identity(session_id))
-        return self._grouped_sessions().get(canonical, [(source, device_id, session_id)])
+    def session_aliases(
+        self, source: str, device_id: str, session_id: str, identity_key: str = "",
+    ) -> list[tuple[str, str, str, str]]:
+        """Look up raw IDs, or pass the persisted identity when using masked IDs."""
+        canonical = (source, identity_key or session_identity(device_id, session_id))
+        return self._grouped_sessions().get(canonical, [(source, device_id, session_id, identity_key)])
 
     def session_events(
         self,
         source: str,
         device_id: str,
         session_id: str,
+        identity_key: str = "",
     ) -> list[StoredEvent]:
         """Load all events for one logical session."""
         events = []
-        for alias in self.session_aliases(source, device_id, session_id):
+        for alias in self.session_aliases(source, device_id, session_id, identity_key):
             rows = self.connection.execute(
                 """
                 SELECT * FROM events
-                WHERE source = ? AND device_id = ? AND session_id = ?
+                WHERE source = ? AND device_id = ? AND session_id = ? AND identity_key = ?
                 ORDER BY id
                 """,
                 alias,
@@ -699,8 +720,10 @@ class EventStore:
         return sorted(events, key=lambda event: event.id)
 
     @staticmethod
-    def session_key(source: str, device_id: str, session_id: str) -> str:
+    def session_key(source: str, device_id: str, session_id: str, identity_key: str = "") -> str:
         """Build a stable session key."""
+        if identity_key:
+            return canonical_json([source, device_id, session_id, identity_key])
         return f"{source}\x1f{device_id}\x1f{session_id}"
 
     def get_render_state(self, session_key: str) -> sqlite3.Row | None:

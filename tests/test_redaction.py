@@ -16,7 +16,7 @@ from agent_session_exporter.cli import main
 from agent_session_exporter.codex_cloud import exec_codex_cloud, sync_codex_cloud
 from agent_session_exporter.core import ClaudeCloudConfig, Config, EventStore, normalize_event
 from agent_session_exporter.importers import import_export
-from agent_session_exporter.redaction import REDACTED, canonical_identity, redact_text, redact_value
+from agent_session_exporter.redaction import REDACTED, canonical_identity, redact_text, redact_value, session_identity
 from agent_session_exporter.renderer import _new_note_path, render_markdown, sync_session, sync_vault
 
 # Synthetic values with provider-valid shapes, never real credentials.
@@ -51,7 +51,7 @@ def write_pre_fix_note(config: Config, event) -> Path:
     target.write_text(content)
     with EventStore(config.state_dir) as store:
         store.set_render_state(
-            store.session_key(event.source, event.device_id, event.session_id),
+            store.session_key(event.source, event.device_id, event.session_id, event.identity_key),
             hashlib.sha256(content.encode()).hexdigest(), path.as_posix(),
             source_hash=hashlib.sha256(render_markdown(document).encode()).hexdigest(),
         )
@@ -59,6 +59,66 @@ def write_pre_fix_note(config: Config, event) -> Path:
 
 
 class RedactionTest(unittest.TestCase):
+    def test_identical_masked_ids_keep_distinct_provenance_and_notes(self) -> None:
+        for field in ("session_id", "device_id"):
+            for remote in (False, True):
+                with self.subTest(field=field, remote=remote), tempfile.TemporaryDirectory() as directory:
+                    config = config_for(Path(directory))
+                    envelopes = []
+                    for raw_id in (GITHUB, canonical_identity(GITHUB)):
+                        device = raw_id if field == "device_id" else config.device_id
+                        session = raw_id if field == "session_id" else "session-1"
+                        payload = {"session_id": session, "hook_event_name": "UserPromptSubmit",
+                                   "timestamp": "2026-09-12T00:00:00Z", "prompt": "same text",
+                                   "identity_key": "0" * 64}  # Hook input cannot forge provenance.
+                        envelope = normalize_event(payload, "claude-cloud", config,
+                                                   device_id=device, inspect_cwd=False)
+                        self.assertEqual(envelope["identity_key"], session_identity(device, session))
+                        if remote:
+                            envelope = _remote_envelope(config, envelope)
+                        envelopes.append(envelope)
+                    self.assertEqual(envelopes[0][field], envelopes[1][field])
+                    self.assertNotEqual(envelopes[0]["identity_key"], envelopes[1]["identity_key"])
+                    self.assertNotEqual(envelopes[0]["fingerprint"], envelopes[1]["fingerprint"])
+                    with EventStore(config.state_dir) as store:
+                        for envelope in envelopes:
+                            self.assertTrue(store.add_event(envelope)[1])
+                            self.assertFalse(store.add_event(envelope)[1])
+                        self.assertEqual(len(store.list_session_keys()), 2)
+                        self.assertTrue(all(len(store.session_events(*key)) == 1
+                                            for key in store.list_session_keys()))
+                    for envelope in reversed(envelopes):
+                        self.assertTrue(sync_session(config, envelope["source"], envelope["device_id"],
+                                                     envelope["session_id"], envelope["identity_key"]))
+                    self.assertEqual(len(list(config.vault_path.rglob("*.md"))), 2)
+                    self.assertEqual({line for path in config.vault_path.rglob("*.md")
+                                      for line in path.read_text().splitlines() if line.startswith("identity_key:")},
+                                     {f'identity_key: "{event["identity_key"]}"' for event in envelopes})
+                    self.assertEqual(sync_vault(config), (0, 2))
+
+    def test_legacy_provenance_migration_does_not_guess_from_pseudonym_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = config_for(Path(directory))
+            legacy_rows = []
+            with EventStore(config.state_dir) as store:
+                for session in (GITHUB, canonical_identity(GITHUB)):
+                    event = normalize_event({"session_id": session, "prompt": "old"},
+                                            "claude-code", replace(config, redact=False), inspect_cwd=False)
+                    event.pop("identity_key")
+                    store.add_event(event)
+                store.connection.execute("ALTER TABLE events DROP COLUMN identity_key")
+                store.connection.commit()
+                legacy_rows = [tuple(row) for row in store.connection.execute("SELECT * FROM events")]
+            with EventStore(config.state_dir) as store:
+                self.assertEqual([tuple(row)[:-1] for row in store.connection.execute("SELECT * FROM events")], legacy_rows)
+                self.assertEqual(len(store.list_session_keys()), 2)
+                for session in (GITHUB, canonical_identity(GITHUB)):
+                    store.add_event(normalize_event({"session_id": session, "prompt": "new"},
+                                                   "claude-code", config, inspect_cwd=False))
+                self.assertEqual(len(store.list_session_keys()), 2)
+                for key in store.list_session_keys():
+                    self.assertEqual([e.payload["prompt"] for e in store.session_events(*key)], ["old", "new"])
+
     def test_legacy_and_pseudonymized_sessions_reuse_one_complete_note(self) -> None:
         opaque = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
         for identity in ("session", "device", "both"):
@@ -75,6 +135,7 @@ class RedactionTest(unittest.TestCase):
                             "session_id": session, "hook_event_name": "UserPromptSubmit",
                             "timestamp": "2026-09-12T00:00:01Z", "prompt": "legacy-only-message",
                         }, "claude-code", legacy_config, inspect_cwd=False)
+                        legacy.pop("identity_key")  # Pre-migration rows have no provenance.
                         with EventStore(config.state_dir) as store:
                             store.add_event(legacy)
                             old_event = store.list_events()[0]
@@ -95,6 +156,7 @@ class RedactionTest(unittest.TestCase):
                             for envelope in (legacy, current):
                                 events = store.session_events(
                                     envelope["source"], envelope["device_id"], envelope["session_id"],
+                                    envelope.get("identity_key", ""),
                                 )
                                 self.assertEqual([asdict(event) for event in events], before)
                         if prior_state in ("split", "overwritten"):
@@ -102,6 +164,7 @@ class RedactionTest(unittest.TestCase):
                         if immediate:
                             self.assertTrue(sync_session(
                                 config, current["source"], current["device_id"], current["session_id"],
+                                current["identity_key"],
                             ))
                         else:
                             self.assertEqual(sync_vault(config), (1, 0))
@@ -138,13 +201,13 @@ class RedactionTest(unittest.TestCase):
                     store.add_event(normalize_event({
                         "session_id": current_session, "prompt": str(index),
                     }, source, config, device_id=current_device, inspect_cwd=False))
-                    # Exercise cache invalidation as new aliases are added.
-                    self.assertEqual(len(store.list_session_keys()), max(1, index - 2))
+                    # These are seven different raw identities, regardless of their prefixes.
+                    self.assertEqual(len(store.list_session_keys()), index + 1)
                 with patch("agent_session_exporter.redaction._detectors", side_effect=AssertionError("scan")):
-                    self.assertEqual(len(store.list_session_keys()), 4)
+                    self.assertEqual(len(store.list_session_keys()), 7)
                     self.assertEqual([event.payload["prompt"] for event in store.session_events(
                         "claude-code", canonical_identity(device), canonical_identity(session),
-                    )], ["0", "1", "2", "3"])
+                    )], ["3"])
 
     def test_split_note_repair_preserves_user_edits(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -38,7 +38,7 @@ npx wrangler secret put PULL_TOKEN
 
 さらに[暗号鍵の管理手順](../../docs/message-buffer.md#workerの鍵)に従い、
 `BUFFER_ENCRYPTION_KEYS`を登録してください。既存環境を更新するときも
-`npm run migrate`で`0002_message_buffer.sql`を適用し、鍵を登録してから
+`npm run migrate`で`0002_message_buffer.sql`と`0003_event_identity.sql`を適用し、鍵を登録してから
 新しいWorkerでのhook受信を有効にします。
 
 ```bash

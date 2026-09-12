@@ -145,6 +145,27 @@ test("detected session identifiers remain distinct and stable in D1", async () =
   }
 });
 
+test("raw pseudonym-shaped IDs have separate provenance through storage and pull", async () => {
+  const env = environment();
+  const raw = "ghp_" + "a".repeat(36);
+  const pseudonym = "redacted-" + createHash("sha256").update(raw).digest("hex");
+  const identities = new Set();
+  for (const session of [raw, pseudonym]) {
+    const payload = sampleEvent({ session_id: session, identity_key: "0".repeat(64) });
+    for (let repeat = 0; repeat < 2; repeat++)
+      assert.equal((await worker.fetch(hookRequest(payload), env)).status, 202);
+    identities.add(createHash("sha256").update(JSON.stringify([env.DEVICE_ID, session])).digest("hex"));
+  }
+  assert.equal(env.DB.rows.length, 2);
+  assert.equal(env.DB.rows[0].session_id, env.DB.rows[1].session_id);
+  assert.notEqual(env.DB.rows[0].fingerprint, env.DB.rows[1].fingerprint);
+  assert.deepEqual(new Set(env.DB.rows.map((row) => row.identity_key)), identities);
+  const response = await worker.fetch(new Request("https://inbox.example/v1/events", {
+    headers: { Authorization: "Bearer pull-secret" },
+  }), env);
+  assert.deepEqual(new Set((await response.json()).events.map((event) => event.identity_key)), identities);
+});
+
 test("health reports whether bindings and secrets are configured", async () => {
   const healthy = await worker.fetch(
     new Request("https://inbox.example/health"),

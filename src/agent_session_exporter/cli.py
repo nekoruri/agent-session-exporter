@@ -233,6 +233,7 @@ def _capture(args: argparse.Namespace, config_path: Path) -> int:
                 str(envelope["source"]),
                 str(envelope["device_id"]),
                 str(envelope["session_id"]),
+                str(envelope["identity_key"]),
             )
         except (OSError, TypeError, ValueError) as error:
             print(f"warning: Vault sync failed: {_error_detail(error)}", file=sys.stderr)

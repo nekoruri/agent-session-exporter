@@ -29,7 +29,7 @@ DOMを直接読む方式には依存しません。
 ## 必要環境とインストール
 
 - Python 3.11以上
-- 実行時の外部Python packageなし
+- 実行時にdetect-secrets（資格情報の検出）とcryptography（分割メッセージの暗号化）を使用
 - Codex Cloud連携だけは、認証済みの`codex` CLIが必要
 - Claude Cloud受信基盤を自分でdeployする場合だけ、Node.jsとCloudflare accountが必要
 
@@ -46,7 +46,8 @@ uv tool install .
 uv tool install --editable .
 ```
 
-`pipx install .`でもインストールできます。以下では短いコマンド名`ase`を使います。
+`pipx install .`でもインストールできます。必要なPython依存パッケージは、これらの
+インストールコマンドで自動的に導入されます。以下では短いコマンド名`ase`を使います。
 
 ## 1. 初期設定
 

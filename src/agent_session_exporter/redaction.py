@@ -108,10 +108,14 @@ def redact_text(value: str) -> str:
 
 
 def canonical_identity(value: str) -> str:
-    """Compare raw and pseudonymized IDs without depending on current detector rules."""
-    if re.fullmatch(r"redacted-[0-9a-f]{64}", value):
-        return value
+    """Hash a raw ID; a raw string can itself look like a generated pseudonym."""
     return "redacted-" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def session_identity(device_id: str, session_id: str) -> str:
+    """Persist the identity before redaction, independently of its display strings."""
+    raw = json.dumps([device_id, session_id], ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def redact_value(value: Any, key: str = "") -> Any:

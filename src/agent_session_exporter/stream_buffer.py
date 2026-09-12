@@ -161,17 +161,19 @@ class PendingMessage(dict):
 
 def stage_message(store, pending: PendingMessage) -> tuple[int, bool]:
     from .core import event_fingerprint
-    from .redaction import canonical_identity, redact_value
+    from .redaction import canonical_identity, redact_value, session_identity
 
     raw = pending.raw
     message_id, index, final, _delta = chunk_fields(raw["payload"])
-    stream_id = hashlib.sha256(encoded([
+    stream_identity = [
         raw["source"], canonical_identity(raw["device_id"]),
         canonical_identity(raw["session_id"]), message_id,
-    ])).hexdigest()
+    ]
+    if raw["identity_key"] != session_identity(raw["device_id"], raw["session_id"]):
+        # Worker IDs may already be masked; its persisted provenance distinguishes them.
+        stream_identity.append(raw["identity_key"])
+    stream_id = hashlib.sha256(encoded(stream_identity)).hexdigest()
     db = store.connection
-    # ponytail: SQLite serializes writers while scanning a complete message (8 MiB cap).
-    # Move assembly out of the transaction with compare-and-swap if contention matters.
     db.execute("BEGIN IMMEDIATE")
     try:
         receipt = db.execute("SELECT event_id FROM message_receipts WHERE stream = ?", (stream_id,)).fetchone()
@@ -212,21 +214,38 @@ def stage_message(store, pending: PendingMessage) -> tuple[int, bool]:
             if not finals or len(rows) != finals[0] + 1:
                 db.commit()
                 return 0, False
-            chunks = [decrypt(row) for row in rows]
-            event = chunks[0]
-            payload = event["payload"]
-            text = "".join(chunk_fields(chunk["payload"])[3] for chunk in chunks)
-            for alias in ("text", "message", "messageId"):
-                payload.pop(alias, None)
-            payload.update(message_id=message_id, index=0, final=True, delta=text)
-            event = redact_value(event)
-            event["fingerprint"] = event_fingerprint({key: event[key] for key in
-                ("source", "device_id", "session_id", "event_name", "occurred_at", "payload")})
-            event_id, inserted = store._insert_event(event)
-            db.execute("INSERT INTO message_receipts VALUES (?, ?)", (stream_id, event_id))
-            db.execute("DELETE FROM message_chunks WHERE stream = ?", (stream_id,))
+            # Retain the encrypted snapshot and keys in memory, then release both locks.
             db.commit()
-            return event_id, inserted
+    except BaseException:
+        db.rollback()
+        raise
+
+    chunks = [decrypt(row) for row in rows]
+    event = chunks[0]
+    payload = event["payload"]
+    text = "".join(chunk_fields(chunk["payload"])[3] for chunk in chunks)
+    for alias in ("text", "message", "messageId"):
+        payload.pop(alias, None)
+    payload.update(message_id=message_id, index=0, final=True, delta=text)
+    event = redact_value(event)
+    event["identity_key"] = raw["identity_key"]
+    event["fingerprint"] = event_fingerprint({key: event[key] for key in
+        ("source", "device_id", "session_id", "event_name", "occurred_at", "payload", "identity_key")})
+
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        receipt = db.execute("SELECT event_id FROM message_receipts WHERE stream = ?", (stream_id,)).fetchone()
+        if receipt:
+            db.commit()
+            return int(receipt[0]), False
+        current = db.execute("SELECT * FROM message_chunks WHERE stream = ? ORDER BY idx", (stream_id,)).fetchall()
+        if current != rows:
+            raise ValueError("Buffered message changed during inspection; retry the chunk.")
+        event_id, inserted = store._insert_event(event)
+        db.execute("INSERT INTO message_receipts VALUES (?, ?)", (stream_id, event_id))
+        db.execute("DELETE FROM message_chunks WHERE stream = ?", (stream_id,))
+        db.commit()
+        return event_id, inserted
     except BaseException:
         db.rollback()
         raise

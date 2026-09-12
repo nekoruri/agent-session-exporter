@@ -10,6 +10,11 @@
 重複保存を防ぎます。nonceは暗号化のたびに生成し、メッセージ識別子・index・final・
 鍵IDも認証対象にします。DBやSQL引数に平文の断片や暗号鍵を渡しません。
 
+Pythonでは、断片の暗号化保存をcommitしてDBと鍵ファイルのロックを解放してから、
+全文を復号・検査します。確定時に受信済み記録と暗号文の一致を再確認し、並行する
+再送が先に確定した場合はその結果を返します。検査や確定に失敗しても、受信済みの
+断片は暗号化したまま残り、再送で再試行できます。
+
 対象はDB単体の流出です。端末の同一ユーザー権限やWorkerの実行環境の侵害は対象外です。
 実行中のメモリには復号した本文が存在します。元のtranscript、既存イベント、
 既存バックアップの書き換えは行いません。公開前の既存データの確認は別途必要です。
@@ -96,7 +101,7 @@ npx wrangler secret put BUFFER_ENCRYPTION_KEYS < "$buffer_key_file"
 SELECT key_id, COUNT(*) AS pending_chunks FROM message_chunks GROUP BY key_id;
 ```
 
-新しいコードの利用前に`0002_message_buffer.sql`を適用してください。
+新しいコードの利用前に`0002_message_buffer.sql`と`0003_event_identity.sql`を適用してください。
 `/health`は鍵の設定不備も`503`で返します。新規デプロイでは、DB作成後にmigrationと
 Secret登録を完了してからhookの送信を有効にしてください。
 

@@ -11,11 +11,95 @@ from unittest.mock import patch
 
 from agent_session_exporter.claude_cloud import _remote_envelope
 from agent_session_exporter.core import EventStore, normalize_event
+from agent_session_exporter.redaction import canonical_identity, redact_value
 from agent_session_exporter.stream_buffer import manage_keys
 from test_redaction import GITHUB, config_for
 
 
 class StreamBufferTest(unittest.TestCase):
+    def test_session_aliases_and_pseudonym_shaped_raw_ids_keep_streams_separate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = config_for(Path(directory))
+            for field in ("session_id", "sessionId", "task_id", "taskId", "id"):
+                for session in (field, canonical_identity(field)):
+                    for index in (0, 1):
+                        payload = {field: session, "hook_event_name": "MessageDisplay", "message_id": "shared",
+                                   "index": index, "final": bool(index), "delta": "hello" if index == 0 else " world"}
+                        with EventStore(config.state_dir) as store:
+                            result = store.add_event(normalize_event(payload, "claude-cloud", config, inspect_cwd=False))
+                            self.assertEqual(result[1], bool(index))
+            with EventStore(config.state_dir) as store:
+                self.assertEqual(len(store.list_session_keys()), 10)
+                self.assertTrue(all(event.payload["delta"] == "hello world" for event in store.list_events()))
+            with self.assertRaisesRegex(ValueError, "session_id"):
+                normalize_event({"hook_event_name": "MessageDisplay", "message_id": "shared", "index": 0,
+                                 "final": True, "delta": "no session"}, "claude-cloud", config, inspect_cwd=False)
+
+    def test_inspection_releases_both_locks_and_concurrent_completion_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = config_for(Path(directory))
+            self.send(config, 0, GITHUB[:4])
+            old_key = json.loads(config.buffer_key_path.read_text())["active"]
+            inspected = False
+            completed_id = None
+
+            def inspect(value, key=""):
+                nonlocal inspected, completed_id
+                if not inspected and isinstance(value, dict) and value.get("payload", {}).get("delta") == GITHUB:
+                    inspected = True
+                    # A second connection and key rotation must succeed while the scanner runs.
+                    with EventStore(config.state_dir) as other:
+                        other.connection.execute("PRAGMA busy_timeout = 0")
+                        manage_keys(other, config.buffer_key_path, rotate=True)
+                        with self.assertRaisesRegex(ValueError, "in-use"):
+                            manage_keys(other, config.buffer_key_path, retire=old_key)
+                    self.assertTrue(self.send(config, 0, "unrelated", final=True, message="other")[1])
+                    completed_id, inserted = self.send(config, 1, GITHUB[4:], final=True)
+                    self.assertTrue(inserted)
+                    with EventStore(config.state_dir) as other:
+                        manage_keys(other, config.buffer_key_path, retire=old_key)
+                return redact_value(value, key)
+
+            with patch("agent_session_exporter.redaction.redact_value", side_effect=inspect):
+                self.assertEqual(self.send(config, 1, GITHUB[4:], final=True), (completed_id, False))
+            self.assertTrue(inspected)
+            with EventStore(config.state_dir) as store:
+                self.assertEqual(len(store.list_events()), 2)
+                self.assertEqual(store.connection.execute("SELECT count(*) FROM message_chunks").fetchone()[0], 0)
+            self.assert_no_plaintext(config, [GITHUB[:4], GITHUB[4:]])
+
+    def test_inspection_failure_and_changed_snapshot_retain_encrypted_data(self):
+        for failure in ("scanner", "changed"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                config = config_for(Path(directory))
+                self.send(config, 0, GITHUB[:4])
+                original = None
+                inspected = False
+
+                def inspect(value, key=""):
+                    nonlocal original, inspected
+                    if not inspected and isinstance(value, dict) and value.get("payload", {}).get("delta") == GITHUB:
+                        inspected = True
+                        if failure == "scanner":
+                            raise ValueError("scanner failed")
+                        with EventStore(config.state_dir) as other:
+                            original = other.connection.execute("SELECT ciphertext FROM message_chunks WHERE idx = 0").fetchone()[0]
+                            other.connection.execute("UPDATE message_chunks SET ciphertext = ? WHERE idx = 0", (b"changed",))
+                            other.connection.commit()
+                    return redact_value(value, key)
+
+                with patch("agent_session_exporter.redaction.redact_value", side_effect=inspect):
+                    with self.assertRaisesRegex(ValueError, "scanner failed|changed during inspection"):
+                        self.send(config, 1, GITHUB[4:], final=True)
+                with EventStore(config.state_dir) as store:
+                    self.assertEqual(store.list_events(), [])
+                    self.assertEqual(store.connection.execute("SELECT count(*) FROM message_chunks").fetchone()[0], 2)
+                    if original is not None:
+                        store.connection.execute("UPDATE message_chunks SET ciphertext = ? WHERE idx = 0", (original,))
+                        store.connection.commit()
+                self.assert_no_plaintext(config, [GITHUB[:4], GITHUB[4:]])
+                self.assertTrue(self.send(config, 1, GITHUB[4:], final=True)[1])
+
     def test_cli_hooks_survive_separate_processes_and_keys_are_not_printed(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -122,13 +206,14 @@ class StreamBufferTest(unittest.TestCase):
             self.assert_no_plaintext(config, [GITHUB[:4], GITHUB[4:]])
             with EventStore(config.state_dir) as store:
                 self.assertEqual(store.list_events(), [])
-                original = store.connection.execute("SELECT ciphertext FROM message_chunks").fetchone()[0]
-                store.connection.execute("UPDATE message_chunks SET ciphertext = ?", (b"broken",))
+                self.assertEqual(store.connection.execute("SELECT count(*) FROM message_chunks").fetchone()[0], 2)
+                original = store.connection.execute("SELECT ciphertext FROM message_chunks WHERE idx = 0").fetchone()[0]
+                store.connection.execute("UPDATE message_chunks SET ciphertext = ? WHERE idx = 0", (b"broken",))
                 store.connection.commit()
             with self.assertRaisesRegex(ValueError, "decrypt"):
                 self.send(config, 1, GITHUB[4:], final=True)
             with EventStore(config.state_dir) as store:
-                store.connection.execute("UPDATE message_chunks SET ciphertext = ?", (original,))
+                store.connection.execute("UPDATE message_chunks SET ciphertext = ? WHERE idx = 0", (original,))
                 store.connection.commit()
             self.assertTrue(self.send(config, 1, GITHUB[4:], final=True)[1])
 

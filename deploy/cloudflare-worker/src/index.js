@@ -156,6 +156,9 @@ async function normalizeEvent(rawPayload, env) {
     transcript_path: "",
     payload,
     received_at: new Date().toISOString(),
+    // Calculate from raw identifiers, never from the shape of a masked string.
+    identity_key: await sha256([String(env.DEVICE_ID || "claude-cloud"),
+      firstString(rawPayload, ["session_id", "sessionId"])]),
   };
   envelope.fingerprint = await sha256({
     source: envelope.source,
@@ -164,6 +167,7 @@ async function normalizeEvent(rawPayload, env) {
     event_name: envelope.event_name,
     occurred_at: envelope.occurred_at,
     payload: envelope.payload,
+    identity_key: envelope.identity_key,
   });
   return envelope;
 }
@@ -211,8 +215,8 @@ function insertEvent(db, event) {
       `INSERT OR IGNORE INTO events (
         fingerprint, source, device_id, session_id, event_name,
         occurred_at, cwd, project, repository, branch,
-        transcript_path, payload_json, received_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        transcript_path, payload_json, received_at, identity_key
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       event.fingerprint,
@@ -228,6 +232,7 @@ function insertEvent(db, event) {
       event.transcript_path,
       canonicalJson(event.payload),
       event.received_at,
+      event.identity_key,
     );
 }
 
@@ -258,13 +263,14 @@ async function listEvents(db, url) {
     .prepare(
       `SELECT id, fingerprint, source, device_id, session_id, event_name,
         occurred_at, cwd, project, repository, branch, transcript_path,
-        payload_json, received_at
+        payload_json, received_at, identity_key
        FROM events WHERE id > ? ORDER BY id LIMIT ?`,
     )
     .bind(after, limit)
     .all();
   const rows = result.results || [];
   const events = rows.map((row) => ({
+    identity_key: row.identity_key,
     fingerprint: row.fingerprint,
     source: row.source,
     device_id: row.device_id,

@@ -55,7 +55,7 @@ def create_old_note(root: Path) -> tuple[Config, PurePosixPath, str]:
     if sync_vault(old_config) != (1, 0):
         raise AssertionError("fixture did not render")
     with EventStore(old_config.state_dir) as store:
-        key = store.session_key("codex-cli", "test-device", "migration-1")
+        key = store.session_key("codex-cli", "test-device", "migration-1", envelope["identity_key"])
         state = store.get_render_state(key)
         if state is None:
             raise AssertionError("fixture has no render state")
@@ -63,6 +63,22 @@ def create_old_note(root: Path) -> tuple[Config, PurePosixPath, str]:
 
 
 class RenderStateMigrationTest(unittest.TestCase):
+    def test_refuses_same_display_ids_with_different_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config, old_path, _ = create_old_note(Path(directory))
+            old_target = config.vault_path / old_path
+            content = old_target.read_text()
+            original = next(line for line in content.splitlines() if line.startswith("identity_key:"))
+            changed = content.replace(original, 'identity_key: "' + "0" * 64 + '"')
+            target = config.vault_path / "ai-sessions" / Path(*old_path.parts[-3:])
+            target.parent.mkdir(parents=True)
+            target.write_text(changed)
+            migrations, errors = migrate_render_state(replace(config, destination="ai-sessions"), apply=True)
+            self.assertEqual(migrations, [])
+            self.assertTrue(any("different session" in error for error in errors))
+            self.assertEqual(target.read_text(), changed)
+            self.assertEqual(old_target.read_text(), content)
+
     def test_dry_run_then_apply_moves_generated_note(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

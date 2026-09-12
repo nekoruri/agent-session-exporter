@@ -16,13 +16,18 @@ Vaultへは直接同期しない。取得・正規化・描画を分離し、別
    session IDがない入力では、マスク後のpayloadから仮IDを生成する。
    Codex Cloudの`exec`でtask IDが返らない場合は、実行ごとにUUIDを生成する。
    検出対象のIDはSHA-256由来の仮名に置き換え、保存・描画時の識別を保つ。
+   マスク前のdevice IDとsession IDの組をハッシュ化した`identity_key`も保存し、
+   仮名と同じ文字列が生のIDとして入力されても区別する。hook本文からは受け取らず、
+   Workerの保存済みenvelopeからpullするときだけ引き継ぐ。
 4. SQLiteへappend-onlyで保存する。同じfingerprintのイベントは追加しない。
    `MessageDisplay`は`finalize_event`から保存層へメモリ内で引き渡し、payloadを
    AES-256-GCMで暗号化して`message_chunks`へ保管する。全断片が揃ったら全文を検査し、
    マスク済みイベントの追加・受信済み記録・暗号文の削除を同じトランザクションで行う。
    Workerも同じ方針でD1のbatchを使う。詳細は[鍵の管理](message-buffer.md)を参照。
-   セッションの列挙・検索では旧IDと仮名IDを同一視し、イベント行とfingerprintは維持する。
-   この対応付けはハッシュで行い、検出ライブラリの現在のルールに依存しない。
+   セッションの列挙・検索はこの保存済み識別値を使い、現在の検出ルールには依存しない。
+   旧イベントには空の`identity_key`列を追加し、既存の値とfingerprintは書き換えない。
+   由来を記録していない旧IDは生のIDとして扱い、仮名らしい文字列から元のIDを推測しない。
+   そのため、旧版ですでに仮名化された履歴は元のIDによる新規履歴と自動では結合しない。
 5. adapterがtranscriptまたはhook payloadからuser/assistant messageを復元する。
    rendererは復元・結合後の本文、タイトル、diff、メタデータを再度マスクする。
    既存イベントにも適用するが、append-onlyのイベント自体は書き換えない。

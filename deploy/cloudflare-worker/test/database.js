@@ -6,7 +6,7 @@ export class TestD1 {
   constructor() {
     this.bindings = [];
     this.connection = new DatabaseSync(":memory:");
-    for (const file of ["0001_events.sql", "0002_message_buffer.sql"])
+    for (const file of ["0001_events.sql", "0002_message_buffer.sql", "0003_event_identity.sql"])
       this.connection.exec(readFileSync(new URL(`../migrations/${file}`, import.meta.url), "utf8"));
   }
   get rows() { return this.connection.prepare("SELECT * FROM events ORDER BY id").all(); }
