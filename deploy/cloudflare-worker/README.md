@@ -3,6 +3,14 @@
 Claude Code on the webのcommand hookからイベントを受け、redact後にD1へ保存します。
 Vaultやローカル端末をインターネットへ公開する必要はありません。
 
+資格情報の検出にはSecretlintの推奨ルールを使います。認証フィールドとURL内の
+ユーザー情報も除去し、会話中の`secretlint-disable`コメントは受け付けません。
+資格情報を外部へ送って検証する処理はありません。ルール更新はnpm依存を更新して
+テストし、`npm run check`でWorkerのビルドを確認します。`nodejs_compat`は
+Secretlintが使うNode.js APIのために必要です。
+検査はpayload内の文字列をまとめて1回実行し、検出位置から各フィールドへマスクを
+戻します。CIでも`npm run check`を実行し、deployのdry-runまで確認します。
+
 ## Deploy
 
 Node.js 22以上とCloudflare accountを用意します。初回の`deploy`でWorkerとD1が
@@ -27,6 +35,11 @@ npx wrangler secret put PULL_TOKEN
 
 各`secret put`のpromptへ、生成したtokenを1つずつ入力します。deploy結果に表示された
 `https://...workers.dev`を控え、設定が揃ったことを確認します。
+
+さらに[暗号鍵の管理手順](../../docs/message-buffer.md#workerの鍵)に従い、
+`BUFFER_ENCRYPTION_KEYS`を登録してください。既存環境を更新するときも
+`npm run migrate`で`0002_message_buffer.sql`と`0003_event_identity.sql`を適用し、鍵を登録してから
+新しいWorkerでのhook受信を有効にします。
 
 ```bash
 curl https://agent-session-exporter.example.workers.dev/health
@@ -103,9 +116,10 @@ serviceとtimerの雛形は[`../systemd-user`](../systemd-user/)にあります�
 
 ## Endpoint
 
-- `POST /v1/hooks/claude-cloud`: Claude Cloud専用。保存時は202、remote対象外は204を返す
+- `POST /v1/hooks/claude-cloud`: 暗号化バッファまたは通常イベントへの保存時は202、remote対象外は204
 - `GET /v1/events?after=0&limit=500`: Vault端末専用。`PULL_TOKEN`で認証する
 - `GET /health`: bindingとsecretの設定状態だけを返す
 
-D1はappend-onlyで、同じfingerprintは`UNIQUE`制約により重複保存しません。
-自動削除や外部向けの汎用投稿APIは用意していません。
+通常の`events`はappend-onlyで、同じfingerprintは`UNIQUE`制約により重複保存しません。
+分割メッセージの暗号化バッファは、マスク済みイベントの保存と同時に削除します。
+未完成メッセージはpullに含めません。外部向けの汎用投稿・削除APIは用意していません。

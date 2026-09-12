@@ -1,3 +1,6 @@
+import { redactValue } from "./redaction.js";
+import { bufferKeys, finishStatements, stageMessage, StreamError } from "./stream_buffer.js";
+
 const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_PULL_LIMIT = 500;
 const CLAUDE_CLOUD_EVENTS = new Map(
@@ -9,13 +12,6 @@ const CLAUDE_CLOUD_EVENTS = new Map(
     "SessionEnd",
   ].map((name) => [name.toLowerCase(), name]),
 );
-const SECRET_KEY_RE =
-  /(?:^|[_-])(?:api[_-]?key|access[_-]?token|client[_-]?secret|secret|token|password|passwd|authorization|cookie)(?:$|[_-])/i;
-const SECRET_VALUE_RES = [
-  /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi,
-  /\bsk-[A-Za-z0-9_-]{12,}/g,
-  /\b(?:gh[opsu]_|github_pat_)[A-Za-z0-9_]{12,}/g,
-];
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -56,29 +52,6 @@ function requireToken(request, expected) {
   if (!sameSecret(bearerToken(request), expected)) {
     throw new HttpError(401, "unauthorized");
   }
-}
-
-function redactText(value) {
-  let result = value;
-  for (const pattern of SECRET_VALUE_RES) {
-    result = result.replace(pattern, "[REDACTED]");
-  }
-  return result;
-}
-
-function redactValue(value, key = "") {
-  if (key && SECRET_KEY_RE.test(key)) return "[REDACTED]";
-  if (typeof value === "string") return redactText(value);
-  if (Array.isArray(value)) return value.map((item) => redactValue(item));
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([childKey, childValue]) => [
-        childKey,
-        redactValue(childValue, childKey),
-      ]),
-    );
-  }
-  return value;
 }
 
 function stableValue(value) {
@@ -138,7 +111,7 @@ async function normalizeEvent(rawPayload, env) {
   ) {
     throw new HttpError(400, "request body must be a JSON object");
   }
-  const payload = redactValue(rawPayload);
+  const payload = await redactValue(rawPayload);
   delete payload.transcript_path;
   delete payload.transcriptPath;
 
@@ -183,6 +156,9 @@ async function normalizeEvent(rawPayload, env) {
     transcript_path: "",
     payload,
     received_at: new Date().toISOString(),
+    // Calculate from raw identifiers, never from the shape of a masked string.
+    identity_key: await sha256([String(env.DEVICE_ID || "claude-cloud"),
+      firstString(rawPayload, ["session_id", "sessionId"])]),
   };
   envelope.fingerprint = await sha256({
     source: envelope.source,
@@ -191,6 +167,7 @@ async function normalizeEvent(rawPayload, env) {
     event_name: envelope.event_name,
     occurred_at: envelope.occurred_at,
     payload: envelope.payload,
+    identity_key: envelope.identity_key,
   });
   return envelope;
 }
@@ -232,14 +209,14 @@ async function readJsonBody(request) {
   }
 }
 
-async function insertEvent(db, event) {
-  await db
+function insertEvent(db, event) {
+  return db
     .prepare(
       `INSERT OR IGNORE INTO events (
         fingerprint, source, device_id, session_id, event_name,
         occurred_at, cwd, project, repository, branch,
-        transcript_path, payload_json, received_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        transcript_path, payload_json, received_at, identity_key
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       event.fingerprint,
@@ -255,8 +232,8 @@ async function insertEvent(db, event) {
       event.transcript_path,
       canonicalJson(event.payload),
       event.received_at,
-    )
-    .run();
+      event.identity_key,
+    );
 }
 
 function parseInteger(value, fallback, minimum, maximum) {
@@ -286,13 +263,14 @@ async function listEvents(db, url) {
     .prepare(
       `SELECT id, fingerprint, source, device_id, session_id, event_name,
         occurred_at, cwd, project, repository, branch, transcript_path,
-        payload_json, received_at
+        payload_json, received_at, identity_key
        FROM events WHERE id > ? ORDER BY id LIMIT ?`,
     )
     .bind(after, limit)
     .all();
   const rows = result.results || [];
   const events = rows.map((row) => ({
+    identity_key: row.identity_key,
     fingerprint: row.fingerprint,
     source: row.source,
     device_id: row.device_id,
@@ -317,7 +295,8 @@ async function handleRequest(request, env) {
   const url = new URL(request.url);
   if (url.pathname === "/health") {
     if (request.method !== "GET") throw new HttpError(405, "method not allowed");
-    const configured = Boolean(env.DB && env.INGEST_TOKEN && env.PULL_TOKEN);
+    let configured = Boolean(env.DB && env.INGEST_TOKEN && env.PULL_TOKEN);
+    try { await bufferKeys(env.BUFFER_ENCRYPTION_KEYS); } catch { configured = false; }
     return jsonResponse(
       { status: configured ? "ok" : "unconfigured" },
       configured ? 200 : 503,
@@ -330,7 +309,20 @@ async function handleRequest(request, env) {
     }
     requireToken(request, env.INGEST_TOKEN);
     const payload = await readJsonBody(request);
-    await insertEvent(env.DB, await normalizeEvent(payload, env));
+    const name = payload && typeof payload === "object"
+      ? firstString(payload, ["hook_event_name", "event_name", "event", "type"]) : "";
+    if (CLAUDE_CLOUD_EVENTS.get(name.toLowerCase()) === "MessageDisplay") {
+      // Without the Sessions API, D1 routes all queries to the primary.
+      const db = env.DB;
+      const complete = await stageMessage(db, await bufferKeys(env.BUFFER_ENCRYPTION_KEYS),
+        payload, String(env.DEVICE_ID || "claude-cloud"));
+      if (complete) {
+        const event = await normalizeEvent(complete.payload, env);
+        await db.batch([insertEvent(db, event), ...finishStatements(db, complete.stream, event.fingerprint)]);
+      }
+    } else {
+      await insertEvent(env.DB, await normalizeEvent(payload, env)).run();
+    }
     return new Response(null, { status: 202 });
   }
   if (url.pathname === "/v1/events") {
@@ -346,8 +338,8 @@ export default {
     try {
       return await handleRequest(request, env);
     } catch (error) {
-      if (error instanceof HttpError) {
-        return jsonResponse({ error: error.message }, error.status);
+      if (error instanceof HttpError || error instanceof StreamError) {
+        return jsonResponse({ error: error.message }, error.status || 400);
       }
       console.error("Worker request failed", error);
       return jsonResponse({ error: "service unavailable" }, 503);

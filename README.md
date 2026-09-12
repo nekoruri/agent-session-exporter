@@ -29,7 +29,7 @@ DOMを直接読む方式には依存しません。
 ## 必要環境とインストール
 
 - Python 3.11以上
-- 実行時の外部Python packageなし
+- 実行時にdetect-secrets（資格情報の検出）とcryptography（分割メッセージの暗号化）を使用
 - Codex Cloud連携だけは、認証済みの`codex` CLIが必要
 - Claude Cloud受信基盤を自分でdeployする場合だけ、Node.jsとCloudflare accountが必要
 
@@ -46,7 +46,8 @@ uv tool install .
 uv tool install --editable .
 ```
 
-`pipx install .`でもインストールできます。以下では短いコマンド名`ase`を使います。
+`pipx install .`でもインストールできます。必要なPython依存パッケージは、これらの
+インストールコマンドで自動的に導入されます。以下では短いコマンド名`ase`を使います。
 
 ## 1. 初期設定
 
@@ -225,10 +226,40 @@ frontmatterの時刻は、`updated_at`が最後のイベント、`rendered_at`�
 実際に書いた時刻です。`archived_at`は完了または失敗したセッションだけに付き、
 継続可能な`active`と`stopped`には付きません。
 
-機密情報対策として、token、password、API key等の名前を持つJSON fieldと、
-代表的なcredential文字列を取り込み時にredactします。ただし万能ではありません。
+`redact = true`（既定）では、token、password、API key等のJSON fieldを値ごと
+マスクします。会話中の資格情報はPython側で
+[detect-secrets](https://github.com/Yelp/detect-secrets)、Worker側で
+[Secretlint](https://github.com/secretlint/secretlint)の検出ルールを使います。
+URLのユーザー情報と機密クエリ、Bearer/Basic認証の値も除去します。
+検出はローカルで完結し、トークンの有効性を確かめる外部通信は行いません。
+Python側は引用符のない会話中のトークンも、ライブラリの文字列のランダムさを
+調べる機能で検出します。この判定には見逃しと過剰なマスクの両方があり得ます。
+session・task・deviceのIDが検出対象になった場合は、同じIDから同じSHA-256由来の
+仮名を生成し、異なる会話や端末を一つにまとめないようにします。
+
+SQLite/D1への保存前に加え、transcriptの読込・分割メッセージの結合後にも
+マスクします。Codex Cloudのタスク・diff・プロンプト、importした会話のタイトル、
+Gitから補ったメタデータも対象です。Python側で秘密鍵のヘッダーを検出した場合は、
+鍵の本体が残らないよう、その本文フィールド全体をマスクします。
+
+`MessageDisplay`の断片はAES-256-GCMで暗号化して一時保管し、全文が揃ってから
+マスク済みイベントとして保存します。ローカルの専用鍵は設定ディレクトリへ自動生成し、
+Workerの専用鍵はWorkers Secretへ登録します。鍵の更新・復旧と導入手順は
+[分割メッセージと暗号鍵の管理](docs/message-buffer.md)を参照してください。
+
+検出できる形式は各ライブラリのルールに依存し、未知の形式や任意の秘密文を
+すべて検出する保証はありません。WorkerとPythonで検出範囲が異なる場合もあります。
 Vaultを同期・共有する前に内容を確認してください。toolの詳細はデフォルトでは
 Markdownへ出力しません。
+
+更新後の`ase sync`では既存イベントから作るノートにも新しいマスクを適用します。
+旧IDと仮名IDが混在する場合も一つの会話として描画し、既存ノートのパスを引き継ぎます。
+旧版で重複生成されたノートは、生成時から未編集と確認できたものだけ統合・整理します。
+編集済みのノートがある場合は、内容を保護するため自動整理を止めてエラーを返します。
+ただし、元のtranscript、既存のSQLite/D1イベント、バックアップは書き換えません。
+過去に保存・共有した資格情報は別途点検してください。`redact = false`はPython側の
+保存・出力のマスクを無効にしますが、Worker側のマスクは常に有効です。
+CLIのエラー診断も、外部サービスやコマンドが資格情報を返す場合に備えて常にマスクします。
 
 ## 開発
 

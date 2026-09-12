@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -15,9 +16,8 @@ from .core import (
     Config,
     EventStore,
     canonical_event_name,
-    event_fingerprint,
+    finalize_event,
     now_iso,
-    redact_value,
 )
 
 CLAUDE_CLOUD_EVENTS = {
@@ -91,7 +91,7 @@ def _remote_envelope(config: Config, value: Mapping[str, Any]) -> dict[str, Any]
     payload = value["payload"]
     if not isinstance(payload, Mapping):
         raise TypeError("Remote event payload must be a JSON object.")
-    cleaned_payload = redact_value(dict(payload)) if config.redact else dict(payload)
+    cleaned_payload = dict(payload)
     cleaned_payload.pop("transcript_path", None)
     cleaned_payload.pop("transcriptPath", None)
     for event_key in ("hook_event_name", "event_name", "event", "type"):
@@ -112,20 +112,10 @@ def _remote_envelope(config: Config, value: Mapping[str, Any]) -> dict[str, Any]
         "payload": cleaned_payload,
         "received_at": str(value.get("received_at") or now_iso()),
     }
-    envelope["fingerprint"] = event_fingerprint(
-        {
-            key: envelope[key]
-            for key in (
-                "source",
-                "device_id",
-                "session_id",
-                "event_name",
-                "occurred_at",
-                "payload",
-            )
-        }
-    )
-    return envelope
+    identity_key = value.get("identity_key", "")
+    if not isinstance(identity_key, str) or (identity_key and not re.fullmatch(r"[0-9a-f]{64}", identity_key)):
+        raise ValueError("Remote event has an invalid identity_key.")
+    return finalize_event(envelope, config, identity_key=identity_key)
 
 
 def pull_events(config: Config, *, limit: int = 500) -> tuple[int, int]:

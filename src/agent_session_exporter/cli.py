@@ -31,6 +31,7 @@ from .hooks import (
     install_local_hooks,
 )
 from .importers import import_export
+from .redaction import redact_text
 from .renderer import (
     migrate_render_state,
     render_state_path_issues,
@@ -41,6 +42,14 @@ from .renderer import (
 
 def _config_path(value: str | None) -> Path:
     return Path(value).expanduser() if value else default_config_path()
+
+
+def _error_detail(error: object) -> str:
+    """Diagnostics must not echo credentials from remote or subprocess errors."""
+    try:
+        return redact_text(str(error))
+    except Exception:
+        return "Details omitted because credential redaction failed."
 
 
 def _valid_destination(value: str) -> str:
@@ -85,6 +94,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     capture.add_argument("--source", required=True)
     capture.add_argument("--verbose", action="store_true")
+
+    keys = subparsers.add_parser("buffer-keys", help="initialize or rotate local message-buffer keys")
+    key_action = keys.add_mutually_exclusive_group()
+    key_action.add_argument("--rotate", action="store_true", help="add an active key, retaining old keys")
+    key_action.add_argument("--retire", metavar="KEY_ID", help="remove an unused old key")
 
     subparsers.add_parser("sync", help="render changed sessions to the Vault")
 
@@ -219,9 +233,10 @@ def _capture(args: argparse.Namespace, config_path: Path) -> int:
                 str(envelope["source"]),
                 str(envelope["device_id"]),
                 str(envelope["session_id"]),
+                str(envelope["identity_key"]),
             )
         except (OSError, TypeError, ValueError) as error:
-            print(f"warning: Vault sync failed: {error}", file=sys.stderr)
+            print(f"warning: Vault sync failed: {_error_detail(error)}", file=sys.stderr)
     if args.verbose:
         print(
             f"event={event_id} inserted={str(inserted).lower()}",
@@ -321,6 +336,14 @@ def run(arguments: Sequence[str] | None = None) -> int:
         return _capture(args, config_path)
 
     config = load_config(config_path)
+    if args.command == "buffer-keys":
+        import json
+        from .stream_buffer import buffer_key_path, manage_keys
+
+        with EventStore(config.state_dir) as store:
+            result = manage_keys(store, buffer_key_path(config), rotate=args.rotate, retire=args.retire)
+        print(json.dumps(result))
+        return 0
     if args.command == "sync":
         written, unchanged = sync_vault(config)
         print(f"written={written} unchanged={unchanged}")
@@ -339,7 +362,7 @@ def run(arguments: Sequence[str] | None = None) -> int:
                 f"{migration.old_path} -> {migration.new_path}{backup}"
             )
         for error in errors:
-            print(f"error: {error}", file=sys.stderr)
+            print(f"error: {_error_detail(error)}", file=sys.stderr)
         print(
             f"planned={len(migrations)} applied="
             f"{len(migrations) if args.apply else 0} errors={len(errors)}"
@@ -394,5 +417,5 @@ def main() -> None:
     except KeyboardInterrupt:
         raise SystemExit(130) from None
     except (OSError, TypeError, ValueError, RuntimeError) as error:
-        print(f"error: {error}", file=sys.stderr)
+        print(f"error: {_error_detail(error)}", file=sys.stderr)
         raise SystemExit(1) from None

@@ -3,6 +3,7 @@
 	"name": "agent-session-exporter",
 	"main": "src/index.js",
 	"compatibility_date": "2026-07-31",
+	"compatibility_flags": ["nodejs_compat"],
 	"workers_dev": true,
 	"vars": {
 		"DEVICE_ID": "claude-cloud"

@@ -7,8 +7,10 @@ import re
 import subprocess
 from collections.abc import Mapping
 from typing import Any
+from uuid import uuid4
 
-from .core import Config, EventStore, event_fingerprint, now_iso
+from .core import Config, EventStore, finalize_event, now_iso
+from .redaction import redact_text
 
 
 def _run_codex_cloud(arguments: list[str]) -> str:
@@ -109,20 +111,7 @@ def sync_codex_cloud(
                 "payload": payload,
                 "received_at": now_iso(),
             }
-            envelope["fingerprint"] = event_fingerprint(
-                {
-                    key: envelope[key]
-                    for key in (
-                        "source",
-                        "device_id",
-                        "session_id",
-                        "event_name",
-                        "occurred_at",
-                        "payload",
-                    )
-                }
-            )
-            _, inserted = store.add_event(envelope)
+            _, inserted = store.add_event(finalize_event(envelope, config))
             inserted_count += int(inserted)
     return inserted_count
 
@@ -158,10 +147,8 @@ def exec_codex_cloud(
             if match:
                 task_id = match.group(1).rstrip(".,:()[]")
                 break
-    task_id = (
-        task_id
-        or event_fingerprint({"query": query, "output": output, "time": now_iso()})[:24]
-    )
+    # Each exec starts a new task, even with identical input in the same second.
+    task_id = task_id or uuid4().hex
     payload = {
         "task_id": task_id,
         "prompt": query,
@@ -184,7 +171,6 @@ def exec_codex_cloud(
         "payload": payload,
         "received_at": now_iso(),
     }
-    envelope["fingerprint"] = event_fingerprint(envelope)
     with EventStore(config.state_dir) as store:
-        store.add_event(envelope)
-    return output
+        store.add_event(finalize_event(envelope, config))
+    return redact_text(output) if config.redact else output

@@ -39,6 +39,7 @@ def config_for(root: Path) -> Config:
         sync_on_capture=True,
         project_aliases={},
         claude_cloud=ClaudeCloudConfig(),
+        buffer_key_path=root / "keys" / "buffer.json",
     )
 
 
@@ -49,7 +50,7 @@ class CoreRendererTest(unittest.TestCase):
             payload = {
                 "session_id": "session-1",
                 "hook_event_name": "UserPromptSubmit",
-                "prompt": "use sk-secretsecretsecret",
+                "prompt": "use " + "ghp_" + "a" * 36,
                 "api_key": "do-not-store",
             }
             envelope = normalize_event(payload, "codex-cli", config)
