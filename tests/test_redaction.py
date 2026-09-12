@@ -383,6 +383,65 @@ class RedactionTest(unittest.TestCase):
                  "session_id": "12345678-1234-1234-1234-123456789012"}
         self.assertEqual(redact_value(value), value)
 
+    def test_credential_keys_are_masked_without_losing_entries_before_storage(self) -> None:
+        pseudonym = canonical_identity(GITHUB)
+        entries = {
+            GITHUB: {"apiKey": "short", "count": 1}, OPENAI: [2, False],
+            pseudonym: "original key", pseudonym + "_": None,
+            "[REDACTED]": 3, "日本語\nキー": 4, "__proto__": 5,
+            "https://user:one@example.invalid/": 6,
+            "https://user:two@example.invalid/": 7,
+        }
+        masked = redact_value(entries)
+        self.assertEqual(len(masked), len(entries))
+        self.assertEqual(masked[pseudonym], "original key")
+        self.assertIsNone(masked[pseudonym + "_"])
+        self.assertEqual(masked[pseudonym + "__"], {"apiKey": REDACTED, "count": 1})
+        self.assertEqual(masked[canonical_identity(OPENAI)], [2, False])
+        for password, number in (("one", 6), ("two", 7)):
+            url = f"https://user:{password}@example.invalid/"
+            self.assertNotIn(url, masked)
+            self.assertEqual(masked[canonical_identity(url)], number)
+        self.assertEqual(redact_value(dict(reversed(list(entries.items())))), masked)
+        self.assertEqual(redact_value(masked), masked)
+        self.assertEqual(redact_value({GITHUB: 1}), {pseudonym: 1})
+        self.assertEqual(entries[GITHUB]["apiKey"], "short")
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = config_for(Path(directory))
+            payload = {"session_id": "key-test", "hook_event_name": "UserPromptSubmit",
+                       "timestamp": "2026-09-12T00:00:00Z", "prompt": "Hello",
+                       "nested": [entries]}
+            with EventStore(config.state_dir) as store:
+                for items in (entries, dict(reversed(list(entries.items())))):
+                    envelope = normalize_event({**payload, "nested": [items]}, "claude-cloud",
+                                               config, inspect_cwd=False)
+                    store.add_event(_remote_envelope(config, envelope))
+                self.assertEqual(len(store.list_events()), 1)
+                saved = store.list_events()[0].payload
+                self.assertEqual(saved["nested"], [masked])
+                for secret in (GITHUB, OPENAI):
+                    self.assertNotIn(secret, json.dumps(saved))
+            self.assertEqual(normalize_event(payload, "claude-code", replace(config, redact=False),
+                                            inspect_cwd=False)["payload"]["nested"], [entries])
+
+    def test_key_inspection_failure_does_not_store_plaintext(self) -> None:
+        def inspect(text):
+            if text == GITHUB:
+                raise RuntimeError("key inspection unavailable")
+            return redact_text(text)
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = config_for(Path(directory))
+            with EventStore(config.state_dir) as store:
+                with (
+                    patch("agent_session_exporter.redaction.redact_text", side_effect=inspect),
+                    self.assertRaisesRegex(RuntimeError, "key inspection unavailable"),
+                ):
+                    store.add_event(normalize_event({"session_id": "key-test", "data": {GITHUB: 1}},
+                                                    "claude-code", config, inspect_cwd=False))
+                self.assertEqual(store.list_events(), [])
+
     def test_unquoted_opaque_tokens_use_library_entropy_detection(self) -> None:
         opaque = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" * 2
         self.assertEqual(redact_text(f"Use {opaque} here."), f"Use {REDACTED} here.")

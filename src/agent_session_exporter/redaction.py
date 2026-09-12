@@ -131,5 +131,17 @@ def redact_value(value: Any, key: str = "") -> Any:
     if isinstance(value, list):
         return [redact_value(item) for item in value]
     if isinstance(value, dict):
-        return {str(k): redact_value(v, str(k)) for k, v in value.items()}
+        result = {}
+        used_keys = {str(k) for k in value}
+        for child_key, child_value in value.items():
+            child_key = str(child_key)
+            masked_key = child_key
+            if redact_text(child_key) != child_key:
+                masked_key = canonical_identity(child_key)
+                # Reserve raw keys too: an input key may already look like a pseudonym.
+                while masked_key in used_keys:
+                    masked_key += "_"
+                used_keys.add(masked_key)
+            result[masked_key] = redact_value(child_value, child_key)
+        return result
     return value
