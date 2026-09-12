@@ -33,10 +33,9 @@ DOMを直接読む方式には依存しません。
 - Codex Cloud連携だけは、認証済みの`codex` CLIが必要
 - Claude Cloud受信基盤を自分でdeployする場合だけ、Node.jsとCloudflare accountが必要
 
-推奨:
+リポジトリのルートディレクトリで実行します:
 
 ```bash
-cd /home/masa/work/agent-session-exporter
 uv tool install .
 ```
 
