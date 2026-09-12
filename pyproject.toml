@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [
-  { name = "Masa" },
+  { name = "NAKAYAMA Masahiro (nekoruri)" },
 ]
 dependencies = ["detect-secrets==1.5.0", "cryptography==50.0.1"]
 
