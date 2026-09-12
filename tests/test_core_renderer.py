@@ -70,7 +70,7 @@ class CoreRendererTest(unittest.TestCase):
                 {
                     "session_id": "desktop-1",
                     "hook_event_name": "sessionEnd",
-                    "workspace_roots": ["/home/masa/work/zenn-content"],
+                    "workspace_roots": ["/workspace/example"],
                 },
                 "claude-code",
                 config,
@@ -78,8 +78,8 @@ class CoreRendererTest(unittest.TestCase):
             )
             self.assertEqual(envelope["event_name"], "SessionEnd")
             self.assertEqual(envelope["payload"]["hook_event_name"], "SessionEnd")
-            self.assertEqual(envelope["cwd"], "/home/masa/work/zenn-content")
-            self.assertEqual(envelope["project"], "zenn-content")
+            self.assertEqual(envelope["cwd"], "/workspace/example")
+            self.assertEqual(envelope["project"], "example")
 
             with EventStore(config.state_dir) as store:
                 store.add_event(envelope)
