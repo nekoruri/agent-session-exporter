@@ -70,7 +70,11 @@ def _parse_date(value: str, timezone_name: str) -> datetime:
             timezone = ZoneInfo(timezone_name)
         except ZoneInfoNotFoundError as error:
             raise ValueError(f"Unknown path_timezone: {timezone_name}") from error
-    return date.astimezone(timezone)
+    try:
+        return date.astimezone(timezone)
+    except OverflowError:
+        # Match the fallback for malformed timestamps, without rewriting stored events.
+        return datetime.now(timezone)
 
 
 def _title_candidate(value: object) -> str:

@@ -75,6 +75,8 @@ path_timezone = "Asia/Tokyo"
 
 設定したtimezoneはOSのIANA timezone databaseで検証します。render stateがある
 既存セッションのパスは変更されません。
+日時の書式が不正な場合や、timezone変換で表現可能な日時の範囲を超える場合は、
+パスに描画時点の時刻を使います。保存済みのイベント日時は変更しません。
 
 ## 2. ローカルCLI / デスクトップhost
 
