@@ -41,6 +41,13 @@ def _parse_cursor(value: object) -> int:
     return cursor
 
 
+class _RejectRedirects(urllib.request.HTTPRedirectHandler):
+    """Let urllib raise HTTPError without forwarding inbox credentials."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl) -> None:
+        return None
+
+
 def _request_json(
     url: str,
     *,
@@ -54,8 +61,9 @@ def _request_json(
     if token:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, headers=headers, method="GET")
+    opener = urllib.request.build_opener(_RejectRedirects())
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with opener.open(request, timeout=timeout) as response:
             result = json.loads(response.read())
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")

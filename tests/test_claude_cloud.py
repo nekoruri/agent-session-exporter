@@ -5,10 +5,13 @@ import json
 import tempfile
 import unittest
 import urllib.error
+import urllib.request
 from dataclasses import replace
+from email.message import Message
 from pathlib import Path
 from typing import Self
 from unittest.mock import patch
+from urllib.response import addinfourl
 
 from agent_session_exporter.claude_cloud import (
     _remote_envelope,
@@ -92,9 +95,9 @@ def remote_event(**overrides: object) -> dict[str, object]:
 class ClaudeCloudTest(unittest.TestCase):
     def test_request_json_builds_authenticated_get(self) -> None:
         with patch(
-            "agent_session_exporter.claude_cloud.urllib.request.urlopen",
+            "agent_session_exporter.claude_cloud.urllib.request.OpenerDirector.open",
             return_value=FakeResponse({"events": [], "next_after": 0}),
-        ) as urlopen:
+        ) as open_request:
             response = _request_json(
                 "https://inbox.example/v1/events",
                 token="pull-token",
@@ -102,14 +105,14 @@ class ClaudeCloudTest(unittest.TestCase):
             )
 
         self.assertEqual(response, {"events": [], "next_after": 0})
-        request = urlopen.call_args.args[0]
+        request = open_request.call_args.args[0]
         self.assertEqual(request.get_method(), "GET")
         self.assertEqual(request.get_header("Authorization"), "Bearer pull-token")
         self.assertEqual(
             request.get_header("User-agent"),
             "agent-session-exporter/0.1.0",
         )
-        self.assertEqual(urlopen.call_args.kwargs["timeout"], 4.0)
+        self.assertEqual(open_request.call_args.kwargs["timeout"], 4.0)
 
     def test_request_json_reports_http_error(self) -> None:
         error = urllib.error.HTTPError(
@@ -121,7 +124,7 @@ class ClaudeCloudTest(unittest.TestCase):
         )
         with (
             patch(
-                "agent_session_exporter.claude_cloud.urllib.request.urlopen",
+                "agent_session_exporter.claude_cloud.urllib.request.OpenerDirector.open",
                 side_effect=error,
             ),
             self.assertRaisesRegex(RuntimeError, "HTTP 503"),
@@ -166,6 +169,41 @@ class ClaudeCloudTest(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "HTTPS"):
                 pull_events(config)
+
+    def test_pull_rejects_redirects_without_forwarding_token_or_advancing_cursor(self) -> None:
+        for status in (301, 302, 303, 307, 308):
+            for target in ("https://inbox.example/moved", "https://other.example/events",
+                           "http://other.example/events"):
+                with self.subTest(status=status, target=target), tempfile.TemporaryDirectory() as directory:
+                    config = config_for(Path(directory))
+                    cursor_key = f"remote-cursor:{config.claude_cloud.url}"
+                    with EventStore(config.state_dir) as store:
+                        store.set_metadata(cursor_key, "5")
+                    requests = []
+
+                    def transport(request):
+                        requests.append((request.full_url, request.get_header("Authorization")))
+                        headers = Message()
+                        code = status if len(requests) == 1 else 200
+                        if len(requests) == 1:
+                            headers["Location"] = target
+                        response = addinfourl(io.BytesIO(b'{"events":[],"next_after":99}'),
+                                              headers, request.full_url, code)
+                        response.msg = "Test response"
+                        return response
+
+                    with (
+                        patch.dict("os.environ", {"AGENT_SESSION_EXPORTER_PULL_TOKEN": "pull-token"}),
+                        patch("urllib.request.HTTPSHandler.https_open", side_effect=transport),
+                        patch("urllib.request.HTTPHandler.http_open", side_effect=transport),
+                        self.assertRaisesRegex(RuntimeError, f"HTTP {status}"),
+                    ):
+                        pull_events(config)
+                    self.assertEqual(requests, [("https://inbox.example/v1/events?after=5&limit=500",
+                                                 "Bearer pull-token")])
+                    with EventStore(config.state_dir) as store:
+                        self.assertEqual(store.get_metadata(cursor_key), "5")
+                        self.assertEqual(store.list_events(), [])
 
     def test_pull_recovers_from_corrupted_cursor_and_imports(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
