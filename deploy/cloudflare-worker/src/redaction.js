@@ -63,8 +63,17 @@ function mapStrings(value, transform, key = "") {
     return value.map((item) => mapStrings(item, transform));
   }
   if (value && typeof value === "object") {
+    const usedKeys = new Set(Object.keys(value));
     return Object.fromEntries(Object.entries(value).map(
-      ([childKey, childValue]) => [childKey, mapStrings(childValue, transform, childKey)],
+      ([childKey, childValue]) => {
+        let maskedKey = transform(childKey, "", true);
+        // Reserve raw keys too: an input key may already look like a pseudonym.
+        if (maskedKey !== childKey) {
+          while (usedKeys.has(maskedKey)) maskedKey += "_";
+          usedKeys.add(maskedKey);
+        }
+        return [maskedKey, mapStrings(childValue, transform, childKey)];
+      },
     ));
   }
   return value;
@@ -73,13 +82,14 @@ function mapStrings(value, transform, key = "") {
 export async function redactValue(value, key = "") {
   const fields = [];
   let offset = 0;
-  const prepared = mapStrings(value, (original, fieldKey) => {
+  const prepared = mapStrings(value, (original, fieldKey, isKey = false) => {
     const text = original
       .replace(/\b[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s"`<>]+/g, cleanUrl)
       .replace(/\b(?:Bearer|Basic)\s+[^\s"'`<>]+/gi, REDACTED);
-    fields.push({ original, key: fieldKey, text, start: offset });
+    fields.push({ original, key: fieldKey, isKey, text, start: offset });
     offset += text.length + 1;
-    return text;
+    // Rename only after detection; URL cleaning alone can collapse distinct keys.
+    return isKey ? original : text;
   }, key);
   if (!fields.length) return prepared;
 
@@ -102,7 +112,7 @@ export async function redactValue(value, key = "") {
     }
     parts.push(text.slice(cursor - start));
     field.text = parts.join("");
-    if (IDENTITY_KEYS.has(field.key) && field.text !== field.original) {
+    if ((field.isKey || IDENTITY_KEYS.has(field.key)) && field.text !== field.original) {
       const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(field.original));
       field.text = "redacted-" + [...new Uint8Array(digest)]
         .map((byte) => byte.toString(16).padStart(2, "0")).join("");

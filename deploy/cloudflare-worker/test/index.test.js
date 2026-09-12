@@ -98,6 +98,68 @@ test("ordinary text and JSON types survive masking, which is idempotent", async 
   assert.deepEqual(await redactValue(masked), masked);
 });
 
+test("credential keys are masked without losing entries before storage and pull", async (t) => {
+  t.mock.method(globalThis, "fetch", () => { throw new Error("network"); });
+  const github = "ghp_" + "a".repeat(36);
+  const openai = "sk-" + "a".repeat(20) + "T3BlbkFJ" + "b".repeat(20);
+  const pseudonym = "redacted-" + createHash("sha256").update(github).digest("hex");
+  const entries = {
+    [github]: { apiKey: "short", count: 1 }, [openai]: [2, false],
+    [pseudonym]: "original key", [pseudonym + "_"]: null,
+    "[REDACTED]": 3, "日本語\nキー": 4, ["__proto__"]: 5,
+    "https://user:one@example.invalid/": 6,
+    "https://user:two@example.invalid/": 7,
+  };
+  const masked = await redactValue(entries);
+  assert.equal(Object.keys(masked).length, Object.keys(entries).length);
+  assert.equal(masked[pseudonym], "original key");
+  assert.equal(masked[pseudonym + "_"], null);
+  assert.deepEqual(masked[pseudonym + "__"], { apiKey: "[REDACTED]", count: 1 });
+  assert.deepEqual(masked["redacted-" + createHash("sha256").update(openai).digest("hex")], [2, false]);
+  for (const [password, number] of [["one", 6], ["two", 7]]) {
+    const url = `https://user:${password}@example.invalid/`;
+    assert.equal(Object.hasOwn(masked, url), false);
+    assert.equal(masked["redacted-" + createHash("sha256").update(url).digest("hex")], number);
+  }
+  assert.equal(masked.__proto__, 5);
+  assert.equal(Object.getPrototypeOf(masked), Object.prototype);
+  const reversed = Object.fromEntries(Object.entries(entries).reverse());
+  assert.deepEqual(await redactValue(reversed), masked);
+  assert.deepEqual(await redactValue(masked), masked);
+  assert.deepEqual(await redactValue({ [github]: 1 }), { [pseudonym]: 1 });
+  assert.equal(entries[github].apiKey, "short");
+  const env = environment();
+  for (const items of [entries, reversed]) {
+    assert.equal((await worker.fetch(hookRequest(sampleEvent({ nested: [items] })), env)).status, 202);
+  }
+  assert.equal(env.DB.rows.length, 1);
+  for (const secret of [github, openai]) {
+    assert.equal(JSON.stringify(env.DB.bindings).includes(secret), false);
+    assert.equal(JSON.stringify(env.DB.rows).includes(secret), false);
+  }
+  const response = await worker.fetch(new Request("https://inbox.example/v1/events", {
+    headers: { Authorization: "Bearer pull-secret" },
+  }), env);
+  assert.deepEqual((await response.json()).events[0].payload.nested, [masked]);
+  assert.equal(globalThis.fetch.mock.callCount(), 0);
+});
+
+test("key pseudonymization failure never persists the raw key", async (t) => {
+  const env = environment();
+  const github = "ghp_" + "a".repeat(36);
+  const digest = crypto.subtle.digest.bind(crypto.subtle);
+  t.mock.method(crypto.subtle, "digest", (algorithm, data) => {
+    if (new TextDecoder().decode(data) === github) throw new Error("key inspection unavailable");
+    return digest(algorithm, data);
+  });
+  t.mock.method(console, "error", () => {});
+  const response = await worker.fetch(hookRequest(sampleEvent({ data: { [github]: 1 } })), env);
+  assert.equal(response.status, 503);
+  assert.equal(env.DB.rows.length, 0);
+  assert.equal(JSON.stringify(env.DB.bindings).includes(github), false);
+  assert.equal((await response.text()).includes(github), false);
+});
+
 test("batched scanning preserves field boundaries, Unicode, multiline keys and large payloads", async () => {
   const github = "ghp_" + "a".repeat(36);
   const openai = "sk-" + "a".repeat(20) + "T3BlbkFJ" + "b".repeat(20);
