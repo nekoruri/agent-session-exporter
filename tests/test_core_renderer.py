@@ -6,8 +6,10 @@ import sqlite3
 import tempfile
 import unittest
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from agent_session_exporter.adapters import (
     build_session_document,
@@ -25,7 +27,7 @@ from agent_session_exporter.core import (
     normalize_event,
     render_initial_config,
 )
-from agent_session_exporter.renderer import session_title, sync_vault
+from agent_session_exporter.renderer import _parse_date, session_title, sync_vault
 
 
 def config_for(root: Path) -> Config:
@@ -398,6 +400,49 @@ class CoreRendererTest(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "Unknown path_timezone"):
                 load_config(config_path)
+
+    def test_out_of_range_dates_do_not_block_later_sessions_or_change_stored_events(self) -> None:
+        cases = (
+            ("9999-12-31T23:59:59Z", "Asia/Tokyo"),
+            ("0001-01-01T00:00:00Z", "America/New_York"),
+            ("9999-12-31T23:59:59-14:00", "UTC"),
+            ("0001-01-01T00:00:00+14:00", "UTC"),
+            ("not-a-date", "Asia/Tokyo"),
+        )
+        clock_time = datetime(2026, 9, 12, 1, 2, 3, tzinfo=UTC)
+        for timestamp, timezone in cases:
+            with self.subTest(timestamp=timestamp, timezone=timezone), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                config = replace(config_for(root), path_timezone=timezone)
+                with EventStore(config.state_dir) as store:
+                    for session, date in (("invalid-date", timestamp),
+                                          ("valid-later", "2026-08-01T00:00:00Z")):
+                        store.add_event(normalize_event({
+                            "session_id": session, "timestamp": date,
+                            "hook_event_name": "UserPromptSubmit", "prompt": session,
+                        }, "claude-code", config, inspect_cwd=False))
+                    original = [event.to_envelope() for event in store.list_events()]
+                with patch("agent_session_exporter.renderer.datetime", wraps=datetime) as dates:
+                    dates.now.side_effect = lambda tz: clock_time.astimezone(tz)
+                    self.assertEqual(sync_vault(config), (2, 0))
+                notes = list(config.vault_path.rglob("*.md"))
+                self.assertEqual(len(notes), 2)
+                invalid_note = next(note for note in notes if 'session_id: "invalid-date"' in note.read_text())
+                expected_date = clock_time.astimezone(ZoneInfo(timezone))
+                self.assertTrue(invalid_note.name.startswith(f"{expected_date:%Y-%m-%d-%H%M}-"))
+                self.assertIn(f'started_at: "{timestamp}"', invalid_note.read_text())
+                self.assertEqual(sync_vault(config), (0, 2))
+                with EventStore(config.state_dir) as store:
+                    self.assertEqual([event.to_envelope() for event in store.list_events()], original)
+
+    def test_valid_boundary_dates_and_naive_dates_keep_their_timezone_conversion(self) -> None:
+        for value, timezone, expected in (
+            ("0001-01-01T01:00:00+01:00", "UTC", "0001-01-01T00:00:00+00:00"),
+            ("9999-12-31T14:59:59Z", "Asia/Tokyo", "9999-12-31T23:59:59+09:00"),
+            ("2026-07-31T16:42:16", "Asia/Tokyo", "2026-08-01T01:42:16+09:00"),
+        ):
+            with self.subTest(value=value, timezone=timezone):
+                self.assertEqual(_parse_date(value, timezone).isoformat(), expected)
 
     def test_codex_and_claude_transcript_adapters(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
