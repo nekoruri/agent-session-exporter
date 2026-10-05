@@ -651,17 +651,17 @@ def sync_session(
         )
 
 
-def sync_vault(config: Config) -> tuple[int, int]:
-    """Render all changed sessions and return written and unchanged counts."""
+def sync_vault_by_source(config: Config) -> dict[str, tuple[int, int]]:
+    """Render changed sessions and return written/unchanged counts per source."""
     if config.vault_path is None:
         raise ValueError("vault_path is not configured. Run `ase init --vault PATH`.")
     vault = config.vault_path
     vault.mkdir(parents=True, exist_ok=True)
-    written = 0
-    unchanged = 0
+    counts: dict[str, tuple[int, int]] = {}
 
     with EventStore(config.state_dir) as store:
         for source, device_id, session_id, identity_key in store.list_session_keys():
+            written, unchanged = counts.get(source, (0, 0))
             if _sync_stored_session(
                 config,
                 store,
@@ -673,4 +673,14 @@ def sync_vault(config: Config) -> tuple[int, int]:
                 written += 1
             else:
                 unchanged += 1
-    return written, unchanged
+            counts[source] = written, unchanged
+    return counts
+
+
+def sync_vault(config: Config) -> tuple[int, int]:
+    """Render all changed sessions and return written and unchanged counts."""
+    counts = sync_vault_by_source(config)
+    return (
+        sum(written for written, _ in counts.values()),
+        sum(unchanged for _, unchanged in counts.values()),
+    )
