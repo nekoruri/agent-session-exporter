@@ -17,6 +17,7 @@ from .codex_cloud import (
 )
 from .core import (
     DEFAULT_DESTINATION,
+    Config,
     EventStore,
     default_config_path,
     load_config,
@@ -36,7 +37,7 @@ from .renderer import (
     migrate_render_state,
     render_state_path_issues,
     sync_session,
-    sync_vault,
+    sync_vault_by_source,
 )
 
 
@@ -50,6 +51,24 @@ def _error_detail(error: object) -> str:
         return redact_text(str(error))
     except Exception:
         return "Details omitted because credential redaction failed."
+
+
+def _sync_vault(config: Config) -> None:
+    counts = sync_vault_by_source(config)
+    written = sum(count for count, _ in counts.values())
+    unchanged = sum(count for _, count in counts.values())
+    print(f"written={written} unchanged={unchanged}")
+    labels = {
+        "codex-cli": "Codex CLI",
+        "claude-code": "Claude Code",
+        "codex-cloud": "Codex Cloud",
+        "claude-cloud": "Claude Cloud",
+        "chatgpt-export": "ChatGPT export",
+        "claude-export": "Claude export",
+    }
+    for source, (count, _) in counts.items():
+        label = labels.get(source) or redact_text(source)
+        print(f"{label}={count}")
 
 
 def _valid_destination(value: str) -> str:
@@ -345,8 +364,7 @@ def run(arguments: Sequence[str] | None = None) -> int:
         print(json.dumps(result))
         return 0
     if args.command == "sync":
-        written, unchanged = sync_vault(config)
-        print(f"written={written} unchanged={unchanged}")
+        _sync_vault(config)
         return 0
     if args.command == "migrate-destination":
         migrations, errors = migrate_render_state(config, apply=args.apply)
@@ -372,8 +390,7 @@ def run(arguments: Sequence[str] | None = None) -> int:
         imported, cursor = pull_events(config, limit=args.limit)
         print(f"imported={imported} cursor={cursor}")
         if args.sync:
-            written, unchanged = sync_vault(config)
-            print(f"written={written} unchanged={unchanged}")
+            _sync_vault(config)
         return 0
     if args.command == "codex-cloud-sync":
         inserted = sync_codex_cloud(
@@ -383,8 +400,7 @@ def run(arguments: Sequence[str] | None = None) -> int:
         )
         print(f"inserted={inserted}")
         if args.sync:
-            written, unchanged = sync_vault(config)
-            print(f"written={written} unchanged={unchanged}")
+            _sync_vault(config)
         return 0
     if args.command == "codex-cloud-exec":
         output = exec_codex_cloud(
@@ -403,8 +419,7 @@ def run(arguments: Sequence[str] | None = None) -> int:
         )
         print(f"inserted={inserted} examined={examined}")
         if args.sync:
-            written, unchanged = sync_vault(config)
-            print(f"written={written} unchanged={unchanged}")
+            _sync_vault(config)
         return 0
     parser.error(f"Unknown command: {args.command}")
     return 2

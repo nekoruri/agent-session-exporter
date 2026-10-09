@@ -110,6 +110,19 @@ ase hooks --source claude
 ase sync
 ```
 
+同期時は合計に続けて、今回Vaultへ書き込んだセッション数を取得元ごとに表示します。
+`ase pull --sync`、`ase codex-cloud-sync --sync`、`ase import-export PATH --sync`も同じ形式です。
+
+```text
+written=3 unchanged=4
+Codex CLI=2
+Claude Code=1
+```
+
+件数はイベント数ではなくセッション数です。保存済みセッションのある取得元を表示し、
+変更がなかった取得元は`0`になります。hookで同期済みのセッションも、追加の変更が
+なければ加算しません。`ase pull`単独ではVaultへ同期しないため、この内訳は表示しません。
+
 cron、systemd timer、launchdなどから定期実行できます。
 
 `destination`を変更した場合、既存セッションの保存先はrender stateに残ります。

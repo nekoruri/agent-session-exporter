@@ -27,7 +27,7 @@ from agent_session_exporter.core import (
     normalize_event,
     render_initial_config,
 )
-from agent_session_exporter.renderer import _parse_date, session_title, sync_vault
+from agent_session_exporter.renderer import _parse_date, session_title, sync_session, sync_vault
 
 
 def config_for(root: Path) -> Config:
@@ -722,6 +722,78 @@ class CoreRendererTest(unittest.TestCase):
                 "Archive this automatically.",
                 notes[0].read_text(encoding="utf-8"),
             )
+
+    def test_sync_commands_report_written_sessions_by_source(self) -> None:
+        commands = (
+            ["sync"],
+            ["pull", "--sync"],
+            ["codex-cloud-sync", "--sync"],
+            ["import-export", "example.json", "--sync"],
+        )
+        for command in commands:
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as directory:
+                config = config_for(Path(directory))
+                with EventStore(config.state_dir) as store:
+                    existing = normalize_event({
+                        "session_id": "already-rendered", "prompt": "Already in the Vault.",
+                    }, "codex-cli", config, inspect_cwd=False)
+                    store.add_event(existing)
+                sync_session(config, "codex-cli", config.device_id, "already-rendered")
+                with EventStore(config.state_dir) as store:
+                    for source, device in (
+                        ("codex-cli", config.device_id),
+                        ("codex-cli", "other-device"),
+                        ("claude-code", config.device_id),
+                        ("claude-cloud", config.device_id),
+                    ):
+                        for prompt in ("First message.", "Second message."):
+                            event = normalize_event({
+                                "session_id": "shared-id", "prompt": prompt,
+                            }, source, config, device_id=device, inspect_cwd=False)
+                            store.add_event(event)
+                            store.add_event(event)
+                with (
+                    patch("agent_session_exporter.cli.load_config", return_value=config),
+                    patch("agent_session_exporter.cli.pull_events", return_value=(0, 10)),
+                    patch("agent_session_exporter.cli.sync_codex_cloud", return_value=0),
+                    patch("agent_session_exporter.cli.import_export", return_value=(0, 0)),
+                ):
+                    for expected in (
+                        ["written=4 unchanged=1", "Codex CLI=2", "Claude Code=1", "Claude Cloud=1"],
+                        ["written=0 unchanged=5", "Codex CLI=0", "Claude Code=0", "Claude Cloud=0"],
+                    ):
+                        with patch("sys.stdout", new_callable=io.StringIO) as output:
+                            self.assertEqual(run(command), 0)
+                        self.assertEqual(output.getvalue().splitlines()[-4:], expected)
+                self.assertEqual(len(list(config.vault_path.rglob("*.md"))), 5)
+
+    def test_pull_without_sync_does_not_report_or_write_vault_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = config_for(Path(directory))
+            with (
+                patch("agent_session_exporter.cli.load_config", return_value=config),
+                patch("agent_session_exporter.cli.pull_events", return_value=(2, 10)),
+                patch("sys.stdout", new_callable=io.StringIO) as output,
+            ):
+                self.assertEqual(run(["pull"]), 0)
+            self.assertEqual(output.getvalue(), "imported=2 cursor=10\n")
+            self.assertFalse(config.vault_path.exists())
+
+    def test_sync_report_masks_legacy_source_names(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = config_for(Path(directory))
+            credential = "ghp_" + "a" * 36
+            with EventStore(config.state_dir) as store:
+                store.add_event(normalize_event({
+                    "session_id": "legacy", "prompt": "Hello.",
+                }, credential, replace(config, redact=False), inspect_cwd=False))
+            with (
+                patch("agent_session_exporter.cli.load_config", return_value=config),
+                patch("sys.stdout", new_callable=io.StringIO) as output,
+            ):
+                self.assertEqual(run(["sync"]), 0)
+            self.assertNotIn(credential, output.getvalue())
+            self.assertEqual(output.getvalue(), "written=1 unchanged=0\n[REDACTED]=1\n")
 
 
 if __name__ == "__main__":
